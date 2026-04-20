@@ -633,7 +633,6 @@ def render_points(m):
 def render_tickets(m, tickets):
     st.markdown("**🎫 All Tickets** — grouped by status")
 
-    # Group by status in order
     grouped = {}
     for t in tickets:
         s = t["status"]
@@ -655,21 +654,14 @@ def render_tickets(m, tickets):
             if t.get("carried_over"):
                 prev_sprints = t.get("sprints", [])
                 src = prev_sprints[0] if prev_sprints else "prev sprint"
-                all_sprints = " → ".join(prev_sprints) if prev_sprints else ""
-                carried_badge = f'<span style="font-size:9px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.35);color:#fbbf24;border-radius:4px;padding:1px 6px;margin-right:4px;white-space:nowrap;" title="Sprint history: {all_sprints}">↩ {src}</span>'
+                all_sprints = " - ".join(prev_sprints) if prev_sprints else ""
+                carried_badge = f'<span style="font-size:9px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.35);color:#fbbf24;border-radius:4px;padding:1px 6px;margin-right:4px;white-space:nowrap;" title="Sprint history: {all_sprints}">&#8617; {src}</span>'
 
-            rows_html += f"""
-            <div class="ticket-row">
-                {carried_badge}
-                <a class="ticket-key" href="{JIRA_BASE}/browse/{t['key']}" target="_blank">{t['key']}</a>
-                <a href="{JIRA_BASE}/browse/{t['key']}" target="_blank" style="font-size:12px;color:#cbd5e1;text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{t['summary']}</a>
-                {assignee_badge}
-                {sp_badge}
-            </div>
-            """
+            rows_html += f'<div class="ticket-row">{carried_badge}<a class="ticket-key" href="{JIRA_BASE}/browse/{t["key"]}" target="_blank">{t["key"]}</a><a href="{JIRA_BASE}/browse/{t["key"]}" target="_blank" style="font-size:12px;color:#cbd5e1;text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{t["summary"]}</a>{assignee_badge}{sp_badge}</div>'
 
-        st.markdown(f"""
-        <div class="dash-card">
+        st.html(f"""
+        <style>.ticket-row{{display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(0,212,255,0.04);font-size:12px;gap:6px;}}.ticket-row:last-child{{border-bottom:none;}}.ticket-key{{font-family:monospace;font-size:11px;color:#00d4ff;text-decoration:none;margin-right:6px;}}.ticket-key:hover{{color:#c4b5fd;}}</style>
+        <div style="background:rgba(13,27,62,0.4);border:1px solid rgba(0,212,255,0.08);border-radius:14px;padding:16px 18px;margin-bottom:12px;">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
                 <span style="width:10px;height:10px;border-radius:50%;background:{color};display:inline-block;"></span>
                 <span style="font-size:13px;font-weight:700;color:{color};">{status}</span>
@@ -677,9 +669,7 @@ def render_tickets(m, tickets):
             </div>
             {rows_html}
         </div>
-        """, unsafe_allow_html=True)
-
-
+        """)
 # ─── MAIN APP ─────────────────────────────────────────────
 def main():
     if not check_pin():
