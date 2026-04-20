@@ -150,7 +150,7 @@ def fetch_available_sprints():
     """Fetch all sprints from Jira Agile API to get start/end dates."""
     # First get the board ID
     url = f"{JIRA_BASE}/rest/agile/1.0/board"
-    params = {"projectKeyOrId": PROJECT, "maxResults": 200}
+    params = {"projectKeyOrId": PROJECT, "maxResults": 10}
     try:
         resp = requests.get(url, auth=jira_auth(), headers=jira_headers(), params=params, timeout=15)
         resp.raise_for_status()
@@ -161,7 +161,7 @@ def fetch_available_sprints():
 
         # Now get sprints for this board
         url2 = f"{JIRA_BASE}/rest/agile/1.0/board/{board_id}/sprint"
-        params2 = {"state": "active,closed", "maxResults": 200}
+        params2 = {"state": "active,closed", "maxResults": 20}
         resp2 = requests.get(url2, auth=jira_auth(), headers=jira_headers(), params=params2, timeout=15)
         resp2.raise_for_status()
         sprints = []
@@ -205,7 +205,7 @@ def fetch_jira_tickets():
     while True:
         params = {
             "jql": f"project = {PROJECT} AND sprint in openSprints() ORDER BY created DESC",
-            "maxResults": 200,
+            "maxResults": 100,
             "startAt": start_at,
             "fields": "summary,status,assignee,customfield_10024,issuetype,fixVersions,customfield_10020,resolutiondate",
         }
@@ -249,6 +249,58 @@ def fetch_jira_tickets():
         if start_at + len(issues) >= data.get("total", 0):
             break
         start_at += len(issues)
+
+    # ── Verification fetch: catches tickets with stale/missing status ──
+    verify_url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    status_groups = [
+        '"Done", "PO/QA VALID", "Demo", "In Production", "CS Reviewed"',
+        '"PO/QA Test run", "Blocked", "In Progress", "Tech review", "PO review"',
+        '"AIM OF THE DAY", "Aim Of The week", "PO not valid", "To Do"',
+    ]
+    existing_keys = {t["key"]: t for t in all_tickets}
+    for status_group in status_groups:
+        try:
+            vparams = {
+                "jql": f'project = {PROJECT} AND sprint in openSprints() AND status in ({status_group})',
+                "maxResults": 200,
+                "fields": "summary,status,assignee,customfield_10024,issuetype,fixVersions,customfield_10020,resolutiondate",
+            }
+            vresp = requests.get(verify_url, headers=jira_headers(), auth=jira_auth(), params=vparams, timeout=30)
+            vresp.raise_for_status()
+            for issue in vresp.json().get("issues", []):
+                f = issue.get("fields", {})
+                key = issue["key"]
+                new_status = f.get("status", {}).get("name", "Unknown")
+                if key in existing_keys:
+                    existing_keys[key]["status"] = new_status
+                else:
+                    sprint_names = []
+                    sprints_raw = f.get("customfield_10020") or []
+                    if isinstance(sprints_raw, list):
+                        for sp in sprints_raw:
+                            if isinstance(sp, dict):
+                                sprint_names.append(sp.get("name", ""))
+                            elif isinstance(sp, str):
+                                sm = re.search(r'name=([^,\]]+)', sp)
+                                if sm:
+                                    sprint_names.append(sm.group(1))
+                    fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
+                    new_ticket = {
+                        "key": key,
+                        "summary": clean_title(f.get("summary", "")),
+                        "status": new_status,
+                        "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                        "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
+                        "type": f.get("issuetype", {}).get("name", "Task"),
+                        "sprints": sprint_names,
+                        "fix_versions": fix_versions,
+                        "carried_over": len(sprint_names) > 1,
+                        "resolution_date": f.get("resolutiondate", ""),
+                    }
+                    all_tickets.append(new_ticket)
+                    existing_keys[key] = new_ticket
+        except Exception:
+            pass
 
     return all_tickets
 
@@ -633,6 +685,7 @@ def render_points(m):
 def render_tickets(m, tickets):
     st.markdown("**🎫 All Tickets** — grouped by status")
 
+    # Group by status in order
     grouped = {}
     for t in tickets:
         s = t["status"]
@@ -654,8 +707,8 @@ def render_tickets(m, tickets):
             if t.get("carried_over"):
                 prev_sprints = t.get("sprints", [])
                 src = prev_sprints[0] if prev_sprints else "prev sprint"
-                all_sprints = " - ".join(prev_sprints) if prev_sprints else ""
-                carried_badge = f'<span style="font-size:9px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.35);color:#fbbf24;border-radius:4px;padding:1px 6px;margin-right:4px;white-space:nowrap;" title="Sprint history: {all_sprints}">&#8617; {src}</span>'
+                all_sprints = " → ".join(prev_sprints) if prev_sprints else ""
+                carried_badge = f'<span style="font-size:9px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.35);color:#fbbf24;border-radius:4px;padding:1px 6px;margin-right:4px;white-space:nowrap;" title="Sprint history: {all_sprints}">↩ {src}</span>'
 
             rows_html += f'<div class="ticket-row">{carried_badge}<a class="ticket-key" href="{JIRA_BASE}/browse/{t["key"]}" target="_blank">{t["key"]}</a><a href="{JIRA_BASE}/browse/{t["key"]}" target="_blank" style="font-size:12px;color:#cbd5e1;text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{t["summary"]}</a>{assignee_badge}{sp_badge}</div>'
 
@@ -670,6 +723,8 @@ def render_tickets(m, tickets):
             {rows_html}
         </div>
         """)
+
+
 # ─── MAIN APP ─────────────────────────────────────────────
 def main():
     if not check_pin():
