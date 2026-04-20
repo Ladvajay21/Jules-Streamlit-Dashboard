@@ -636,7 +636,7 @@ def render_velocity(m):
         </div>
         """
     cards_html += '</div>'
-    st.markdown(cards_html, unsafe_allow_html=True)
+    st.html(cards_html)
 
 
 # ─── STORY POINTS TAB ────────────────────────────────────
