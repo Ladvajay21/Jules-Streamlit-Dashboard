@@ -150,7 +150,7 @@ def fetch_available_sprints():
     """Fetch all sprints from Jira Agile API to get start/end dates."""
     # First get the board ID
     url = f"{JIRA_BASE}/rest/agile/1.0/board"
-    params = {"projectKeyOrId": PROJECT, "maxResults": 10}
+    params = {"projectKeyOrId": PROJECT, "maxResults": 200}
     try:
         resp = requests.get(url, auth=jira_auth(), headers=jira_headers(), params=params, timeout=15)
         resp.raise_for_status()
@@ -161,7 +161,7 @@ def fetch_available_sprints():
 
         # Now get sprints for this board
         url2 = f"{JIRA_BASE}/rest/agile/1.0/board/{board_id}/sprint"
-        params2 = {"state": "active,closed", "maxResults": 20}
+        params2 = {"state": "active,closed", "maxResults": 200}
         resp2 = requests.get(url2, auth=jira_auth(), headers=jira_headers(), params=params2, timeout=15)
         resp2.raise_for_status()
         sprints = []
@@ -205,7 +205,7 @@ def fetch_jira_tickets():
     while True:
         params = {
             "jql": f"project = {PROJECT} AND sprint in openSprints() ORDER BY created DESC",
-            "maxResults": 100,
+            "maxResults": 200,
             "startAt": start_at,
             "fields": "summary,status,assignee,customfield_10024,issuetype,fixVersions,customfield_10020,resolutiondate",
         }
