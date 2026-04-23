@@ -91,13 +91,60 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; back
 div[data-testid="stMetric"] { background: rgba(13,27,62,0.5); border: 1px solid rgba(0,212,255,0.08); border-radius: 12px; padding: 12px 16px; }
 div[data-testid="stMetric"] label { color: #64748b !important; font-size: 11px !important; }
 div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #e2e8f0 !important; font-size: 22px !important; font-weight: 700 !important; }
-.dash-card { background: rgba(13,27,62,0.4); border: 1px solid rgba(0,212,255,0.08); border-radius: 14px; padding: 16px 18px; margin-bottom: 12px; }
+.dash-card { background: rgba(13,27,62,0.4); border: 1px solid rgba(0,212,255,0.08); border-radius: 14px; padding: 16px 18px; margin-bottom: 12px; transition: all 0.25s ease; }
+.dash-card:hover { border-color: rgba(0,212,255,0.2); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #10b981; display: inline-block; animation: livePulse 1.5s ease-in-out infinite; }
-@keyframes livePulse { 0%,100% { opacity: .5; box-shadow: 0 0 0 0 rgba(16,185,129,0.4); } 50% { opacity: 1; box-shadow: 0 0 0 6px rgba(16,185,129,0); } }
+
+/* ── ANIMATIONS ── */
+@keyframes livePulse { 0%,100% { opacity:.5; box-shadow:0 0 0 0 rgba(16,185,129,0.4); } 50% { opacity:1; box-shadow:0 0 0 6px rgba(16,185,129,0); } }
+@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-16px)} }
+@keyframes shimmer { 0%{background-position:-300% center} 100%{background-position:300% center} }
+@keyframes shimmerBar { 0%{background-position:-400% 0} 100%{background-position:400% 0} }
+@keyframes pulse3 { 0%,100%{opacity:.3;transform:scale(1)} 50%{opacity:.7;transform:scale(1.08)} }
+@keyframes fadeUp { from{opacity:0;transform:translateY(28px)} to{opacity:1;transform:translateY(0)} }
+@keyframes fadeInLeft { from{opacity:0;transform:translateX(-20px)} to{opacity:1;transform:translateX(0)} }
+@keyframes bounceIn { 0%{opacity:0;transform:scale(0.3)} 50%{opacity:1;transform:scale(1.05)} 70%{transform:scale(0.95)} 100%{transform:scale(1)} }
+@keyframes borderGlow { 0%,100%{border-color:rgba(248,113,113,0.3);box-shadow:0 0 8px rgba(248,113,113,0.1)} 50%{border-color:rgba(248,113,113,0.7);box-shadow:0 0 20px rgba(248,113,113,0.25)} }
+@keyframes confetti { 0%{transform:translateY(-10px) rotate(0deg);opacity:1} 100%{transform:translateY(110vh) rotate(720deg);opacity:0} }
+@keyframes float-particle { 0%{transform:translateY(100vh) translateX(0) rotate(0deg);opacity:0} 10%{opacity:0.4} 90%{opacity:0.2} 100%{transform:translateY(-10vh) translateX(50px) rotate(360deg);opacity:0} }
+
+/* ── SHIMMER BAR ── */
+.shimmer-bar { background:linear-gradient(90deg,#1e2d47 25%,rgba(0,212,255,0.06) 50%,#1e2d47 75%); background-size:400% 100%; animation:shimmerBar 1.5s infinite; border-radius:8px; }
+
+/* ── SECTION HEADERS ── */
+.section-header { font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#475569;margin-bottom:14px;display:flex;align-items:center;gap:8px; }
+.section-header::after { content:'';flex:1;height:1px;background:linear-gradient(90deg,rgba(0,212,255,0.2),transparent); }
+
+/* ── BLOCKED PULSE ── */
+.blocked-alert { animation: borderGlow 2s ease-in-out infinite; }
+
+/* ── DEV CARD HOVER ── */
+.dev-card { transition: all 0.25s ease !important; }
+.dev-card:hover { transform: translateY(-3px) !important; box-shadow: 0 12px 32px rgba(0,0,0,0.3) !important; }
+
+/* ── KPI CARD ── */
+.kpi-card { animation: bounceIn 0.6s cubic-bezier(0.16,1,0.3,1) both; transition: all 0.25s ease; }
+.kpi-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+
+/* ── FLOATING PARTICLES ── */
+.particle { position:fixed; border-radius:50%; pointer-events:none; animation:float-particle linear infinite; z-index:0; }
+
+/* ── TICKET ROW ── */
 .ticket-key { font-family: 'Space Mono', monospace; font-size: 11px; color: #00d4ff; text-decoration: none; margin-right: 6px; }
 .ticket-key:hover { color: #c4b5fd; }
-.ticket-row { display: flex; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(0,212,255,0.04); font-size: 12px; gap: 6px; }
-.ticket-row:last-child { border-bottom: none; }
+.ticket-row { display:flex; align-items:center; padding:5px 0; border-bottom:1px solid rgba(0,212,255,0.04); font-size:12px; gap:6px; transition:all 0.2s ease; }
+.ticket-row:last-child { border-bottom:none; }
+.ticket-row:hover { padding-left:3px; background:rgba(0,212,255,0.02); }
+
+/* ── BUTTON SHIMMER ── */
+.stButton > button { transition: all 0.3s ease !important; }
+.stButton > button:hover { box-shadow: 0 4px 16px rgba(0,212,255,0.2) !important; }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:#080c1a; }
+::-webkit-scrollbar-thumb { background:#1e2d47; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#2d4a6f; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,22 +153,57 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #e2e8f0 !impo
 def check_pin():
     if not DASHBOARD_PIN:
         return True
-    if "pin_ok" not in st.session_state:
-        st.session_state.pin_ok = False
-    if st.session_state.pin_ok:
+    if st.session_state.get("pin_ok"):
         return True
-    st.markdown("""
-    <div style="text-align:center;padding:80px 20px;">
-        <div style="font-size:48px;margin-bottom:12px;">🔒</div>
-        <h2 style="background:linear-gradient(90deg,#00d4ff,#818cf8);-webkit-background-clip:text;
-        -webkit-text-fill-color:transparent;font-size:22px;font-weight:900;">Jules Sprint Dashboard</h2>
-        <p style="color:#475569;font-size:13px;">Enter PIN to continue</p>
+
+    # Animated login page
+    st.html("""
+    <style>
+    .login-wrap { position:fixed;top:0;left:0;width:100%;height:100%;
+        background:linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%); overflow:hidden; z-index:-2; }
+    .orb-a { position:fixed;top:-120px;right:-80px;width:420px;height:420px;border-radius:50%;
+        background:radial-gradient(circle, rgba(0,212,255,0.12) 0%, transparent 70%);
+        animation:pulse3 5s ease-in-out infinite; }
+    .orb-b { position:fixed;bottom:-180px;left:-120px;width:520px;height:520px;border-radius:50%;
+        background:radial-gradient(circle, rgba(16,185,129,0.09) 0%, transparent 70%);
+        animation:pulse3 7s ease-in-out infinite reverse; }
+    .orb-c { position:fixed;top:45%;left:5%;width:180px;height:180px;border-radius:50%;
+        background:radial-gradient(circle, rgba(56,189,248,0.07) 0%, transparent 70%);
+        animation:pulse3 9s ease-in-out infinite; }
+    .grid-lines { position:fixed;top:0;left:0;width:100%;height:100%;
+        background-image: linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+                          linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+        background-size: 60px 60px; z-index:-1; }
+    .login-card { animation: fadeUp 0.7s cubic-bezier(0.16,1,0.3,1) both; }
+    .rocket { font-size:68px; animation:float 3s ease-in-out infinite; display:block;
+        filter:drop-shadow(0 0 18px rgba(0,212,255,0.9)) drop-shadow(0 0 40px rgba(16,185,129,0.5)); }
+    .login-title { font-size:40px !important; font-weight:900 !important;
+        background: linear-gradient(90deg, #00d4ff, #10b981, #38bdf8, #00d4ff) !important;
+        background-size: 300% auto !important;
+        -webkit-background-clip: text !important; -webkit-text-fill-color: transparent !important;
+        animation: shimmer 4s linear infinite !important; letter-spacing: -1px !important; }
+    .divider-line { width:50px;height:3px;margin:16px auto;
+        background:linear-gradient(90deg,#00d4ff,#10b981); border-radius:99px; }
+    @keyframes pulse3 { 0%,100%{opacity:.3;transform:scale(1)} 50%{opacity:.7;transform:scale(1.08)} }
+    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-16px)} }
+    @keyframes shimmer { 0%{background-position:-300% center} 100%{background-position:300% center} }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(28px)} to{opacity:1;transform:translateY(0)} }
+    </style>
+    <div class="login-wrap"></div>
+    <div class="orb-a"></div><div class="orb-b"></div><div class="orb-c"></div>
+    <div class="grid-lines"></div>
+    <div class="login-card" style="max-width:400px;margin:50px auto 0;text-align:center;">
+        <span class="rocket">🚀</span>
+        <h1 class="login-title">Jules Dashboard</h1>
+        <div class="divider-line"></div>
+        <p style="color:#64748b;font-size:13px;margin-top:12px;">Enter PIN to access sprint data</p>
     </div>
-    """, unsafe_allow_html=True)
+    """)
+
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        pin = st.text_input("PIN", type="password", label_visibility="collapsed", placeholder="Enter PIN...")
-        if st.button("Unlock 🔓", use_container_width=True):
+        pin = st.text_input("PIN", type="password", label_visibility="collapsed", placeholder="· · · ·")
+        if st.button("🔓 Enter Dashboard", use_container_width=True):
             if pin == DASHBOARD_PIN:
                 st.session_state.pin_ok = True
                 st.rerun()
@@ -425,13 +507,14 @@ def post_to_slack(blocked_tickets, m):
 # ─── KPI CARD ─────────────────────────────────────────────
 def kpi_card(icon, label, value, color, subtitle=""):
     sub_html = f'<div style="font-size:9px;color:#475569;margin-top:2px;">{subtitle}</div>' if subtitle else ""
-    st.markdown(f"""
-    <div style="background:rgba(13,27,62,0.5);border:1px solid {color}22;border-radius:12px;padding:12px 14px;text-align:center;">
+    st.html(f"""
+    <div class="kpi-card" style="background:rgba(13,27,62,0.5);border:1px solid {color}22;border-radius:12px;padding:12px 14px;text-align:center;position:relative;overflow:hidden;">
+        <div style="position:absolute;top:0;right:0;width:40px;height:40px;background:radial-gradient(circle,{color}15,transparent);border-radius:0 12px 0 40px;"></div>
         <div style="font-size:10px;color:#64748b;margin-bottom:2px;">{icon} {label}</div>
         <div style="font-size:22px;font-weight:900;color:{color};">{value}</div>
         {sub_html}
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ─── RENDER HEADER ────────────────────────────────────────
@@ -444,16 +527,24 @@ def render_header(m, fetched_at, sprint_name, sprint_start, sprint_days):
 
     import random
     tip = random.choice(SPRINT_TIPS)
-    greeting = random.choice(GREETINGS)
 
-    st.markdown(f"""
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;flex-wrap:wrap;gap:12px;">
+    # Floating particles
+    particles = "".join([
+        f'<div class="particle" style="left:{(i*37)%100}%;width:{3+i%4}px;height:{3+i%4}px;'
+        f'background:{"#00d4ff" if i%3==0 else "#818cf8" if i%3==1 else "#10b981"};'
+        f'opacity:0.12;animation-duration:{8+i*1.3:.1f}s;animation-delay:{i*0.7:.1f}s;"></div>'
+        for i in range(10)
+    ])
+
+    st.html(f"""
+    {particles}
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;flex-wrap:wrap;gap:12px;animation:fadeInLeft 0.6s ease both;">
         <div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                <span class="live-dot"></span>
+                <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;animation:livePulse 1.5s ease-in-out infinite;"></span>
                 <span style="font-size:10px;color:#10b981;text-transform:uppercase;letter-spacing:2px;font-weight:600;">Live · Jira · 5 min cache</span>
             </div>
-            <h1 style="font-size:26px;font-weight:900;margin:0;background:linear-gradient(90deg,#00d4ff,#818cf8,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">
+            <h1 style="font-size:26px;font-weight:900;margin:0;background:linear-gradient(90deg,#00d4ff,#818cf8,#f472b6);background-size:300% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:shimmer 4s linear infinite;">
                 Jules Sprint Dashboard
             </h1>
             <div style="font-size:12px;color:#475569;margin-top:4px;">
@@ -462,16 +553,24 @@ def render_header(m, fetched_at, sprint_name, sprint_start, sprint_days):
             <div style="font-size:11px;color:#334155;margin-top:4px;font-style:italic;">💡 {tip}</div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <div style="background:rgba(0,212,255,0.07);border:1px solid rgba(0,212,255,0.18);border-radius:10px;padding:10px 16px;font-size:12px;color:#7dd3fc;text-align:center;">
+            <div style="background:rgba(0,212,255,0.07);border:1px solid rgba(0,212,255,0.18);border-radius:10px;padding:10px 16px;font-size:12px;color:#7dd3fc;text-align:center;animation:bounceIn 0.5s ease both;">
                 📅 Day <strong>{m['current_day']}</strong> / {sprint_days}<br>
                 <span style="color:#475569;font-size:10px;">{days_left} days left</span>
             </div>
-            <div style="background:{sc}12;border:1px solid {sc}35;border-radius:10px;padding:10px 16px;font-size:12px;color:{sc};text-align:center;">
+            <div style="background:{sc}12;border:1px solid {sc}35;border-radius:10px;padding:10px 16px;font-size:12px;color:{sc};text-align:center;animation:bounceIn 0.7s ease both;">
                 {sl}<br><span style="color:#475569;font-size:10px;">{pct}% done</span>
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    <style>
+    @keyframes livePulse {{ 0%,100% {{ opacity:.5;box-shadow:0 0 0 0 rgba(16,185,129,0.4); }} 50% {{ opacity:1;box-shadow:0 0 0 6px rgba(16,185,129,0); }} }}
+    @keyframes shimmer {{ 0%{{background-position:-300% center}} 100%{{background-position:300% center}} }}
+    @keyframes fadeInLeft {{ from{{opacity:0;transform:translateX(-20px)}} to{{opacity:1;transform:translateX(0)}} }}
+    @keyframes bounceIn {{ 0%{{opacity:0;transform:scale(0.3)}} 50%{{opacity:1;transform:scale(1.05)}} 70%{{transform:scale(0.95)}} 100%{{transform:scale(1)}} }}
+    @keyframes float-particle {{ 0%{{transform:translateY(100vh) translateX(0) rotate(0deg);opacity:0}} 10%{{opacity:0.4}} 90%{{opacity:0.2}} 100%{{transform:translateY(-10vh) translateX(50px) rotate(360deg);opacity:0}} }}
+    .particle {{ position:fixed;border-radius:50%;pointer-events:none;animation:float-particle linear infinite;z-index:0; }}
+    </style>
+    """)
 
 
 # ─── OVERVIEW TAB ─────────────────────────────────────────
@@ -624,18 +723,19 @@ def render_velocity(m):
         if d["blocked"] > 0:
             blocked_badge = f'<span style="font-size:9px;background:rgba(248,113,113,0.15);border:1px solid rgba(248,113,113,0.4);color:#f87171;border-radius:4px;padding:1px 5px;">🚫 {d["blocked"]}</span>'
         cards_html += f"""
-        <div style="flex:1;min-width:140px;background:rgba(13,27,62,0.5);border:1px solid {color}30;border-radius:12px;padding:12px;text-align:center;">
+        <div class="dev-card" style="flex:1;min-width:140px;background:rgba(13,27,62,0.5);border:1px solid {color}30;border-radius:12px;padding:12px;text-align:center;cursor:default;">
             <div style="width:36px;height:36px;border-radius:50%;background:{color}25;border:2px solid {color};display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-size:13px;font-weight:700;color:{color};">{initials}</div>
             <div style="font-size:12px;font-weight:700;color:#e2e8f0;">{name.split()[0]}</div>
             <div style="font-size:10px;color:#475569;">{d['done']}/{d['total']} done · {d['sp']} SP</div>
             <div style="width:100%;height:5px;background:#0d1528;border-radius:3px;margin-top:6px;overflow:hidden;">
-                <div style="width:{pct}%;height:100%;background:{color};border-radius:3px;"></div>
+                <div style="width:{pct}%;height:100%;background:linear-gradient(90deg,{color},{color}cc);border-radius:3px;"></div>
             </div>
             <div style="font-size:10px;color:{color};margin-top:3px;">{pct}%</div>
             {blocked_badge}
         </div>
         """
     cards_html += '</div>'
+    cards_html += '<style>.dev-card{transition:all 0.25s ease !important;}.dev-card:hover{transform:translateY(-3px) !important;box-shadow:0 12px 32px rgba(0,0,0,0.3) !important;}</style>'
     st.html(cards_html)
 
 
