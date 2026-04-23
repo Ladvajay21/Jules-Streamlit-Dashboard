@@ -30,7 +30,8 @@ PROJECT       = "JENG"
 DONE_STATUSES    = {"Done", "PO/QA VALID", "Demo", "In Production", "CS Reviewed"}
 BLOCKED_STATUSES = {"Blocked"}
 ACTIVE_STATUSES  = {"In Progress", "AIM OF THE DAY", "Tech review", "PO review",
-                     "PO/QA Test run", "Aim Of The week", "PO not valid"}
+                     "PO/QA Test run", "Aim Of The week", "PO not valid", "TECH GROOMED"}
+EXCLUDE_FROM_CARDS = {"Unassigned", "Jay Ladva"}
 
 DEV_COLORS = {
     "Nikita Vaidya": "#818cf8",
@@ -45,13 +46,14 @@ STATUS_COLORS = {
     "Demo": "#a7f3d0", "In Production": "#059669", "CS Reviewed": "#065f46",
     "PO review": "#818cf8", "Tech review": "#a78bfa", "In Progress": "#38bdf8",
     "AIM OF THE DAY": "#7dd3fc", "Aim Of The week": "#bae6fd",
+    "TECH GROOMED": "#c084fc",
     "To Do": "#64748b", "Blocked": "#f87171", "PO not valid": "#f97316",
 }
 
 STATUS_ORDER = [
     "Done", "PO/QA VALID", "Demo", "In Production", "CS Reviewed",
     "PO/QA Test run", "Tech review", "PO review",
-    "AIM OF THE DAY", "In Progress", "Aim Of The week",
+    "AIM OF THE DAY", "In Progress", "Aim Of The week", "TECH GROOMED",
     "To Do", "Blocked", "PO not valid",
 ]
 
@@ -332,24 +334,23 @@ def fetch_jira_tickets():
             break
         start_at += len(issues)
 
-    # ── Verification fetch: catches tickets with stale/missing status ──
+    # ── Catch-all verification: fetches ALL sprint tickets regardless of status ──
     verify_url = f"{JIRA_BASE}/rest/api/3/search/jql"
-    status_groups = [
-        '"Done", "PO/QA VALID", "Demo", "In Production", "CS Reviewed"',
-        '"PO/QA Test run", "Blocked", "In Progress", "Tech review", "PO review"',
-        '"AIM OF THE DAY", "Aim Of The week", "PO not valid", "To Do"',
-    ]
     existing_keys = {t["key"]: t for t in all_tickets}
-    for status_group in status_groups:
+    v_start = 0
+    while True:
         try:
             vparams = {
-                "jql": f'project = {PROJECT} AND sprint in openSprints() AND status in ({status_group})',
+                "jql": f'project = {PROJECT} AND sprint in openSprints() ORDER BY key ASC',
                 "maxResults": 200,
+                "startAt": v_start,
                 "fields": "summary,status,assignee,customfield_10024,issuetype,fixVersions,customfield_10020,resolutiondate",
             }
             vresp = requests.get(verify_url, headers=jira_headers(), auth=jira_auth(), params=vparams, timeout=30)
             vresp.raise_for_status()
-            for issue in vresp.json().get("issues", []):
+            vdata = vresp.json()
+            v_issues = vdata.get("issues", [])
+            for issue in v_issues:
                 f = issue.get("fields", {})
                 key = issue["key"]
                 new_status = f.get("status", {}).get("name", "Unknown")
@@ -381,8 +382,11 @@ def fetch_jira_tickets():
                     }
                     all_tickets.append(new_ticket)
                     existing_keys[key] = new_ticket
+            if v_start + len(v_issues) >= vdata.get("total", 0):
+                break
+            v_start += len(v_issues)
         except Exception:
-            pass
+            break
 
     return all_tickets
 
@@ -462,6 +466,10 @@ def build_metrics(tickets, sprint_start=None, sprint_days=48):
     else:
         status = "behind"
 
+    # Missing SP count
+    missing_sp_tickets = [t for t in tickets if t.get("sp") is None]
+    missing_sp_keys = [t["key"] for t in missing_sp_tickets]
+
     return {
         "total": total,
         "done_tickets": done_tickets,
@@ -477,6 +485,8 @@ def build_metrics(tickets, sprint_start=None, sprint_days=48):
         "true_velocity": true_velocity,
         "true_velocity_sp": true_velocity_sp,
         "pre_sprint_done": pre_sprint_done,
+        "missing_sp_count": len(missing_sp_tickets),
+        "missing_sp_keys": missing_sp_keys,
     }
 
 
@@ -605,6 +615,20 @@ def render_overview(m, tickets):
     </div>
     """, unsafe_allow_html=True)
 
+    # Missing SP warning
+    if m["missing_sp_count"] > 0:
+        missing_pct = round(m["missing_sp_count"] / total * 100) if total else 0
+        first_5 = ", ".join(m["missing_sp_keys"][:5])
+        more = f" +{m['missing_sp_count'] - 5} more" if m["missing_sp_count"] > 5 else ""
+        st.html(f"""
+        <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:12px;padding:10px 14px;margin-bottom:12px;animation:borderGlow 3s ease-in-out infinite;">
+            <span style="font-size:11px;color:#fbbf24;font-weight:700;">⚠️ Missing Story Points</span>
+            <span style="font-size:11px;color:#64748b;margin-left:8px;">{m['missing_sp_count']}/{total} tickets ({missing_pct}%) have no SP assigned</span>
+            <span style="font-size:10px;color:#475569;margin-left:12px;">{first_5}{more}</span>
+        </div>
+        <style>@keyframes borderGlow {{ 0%,100%{{border-color:rgba(251,191,36,0.15);}} 50%{{border-color:rgba(251,191,36,0.4);}} }}</style>
+        """)
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -695,7 +719,7 @@ def render_burndown(m, sprint_days):
 
 # ─── VELOCITY TAB ─────────────────────────────────────────
 def render_velocity(m):
-    devs = [(n, d) for n, d in m["dev_map"].items() if n != "Unassigned"]
+    devs = [(n, d) for n, d in m["dev_map"].items() if n not in EXCLUDE_FROM_CARDS]
     devs.sort(key=lambda x: x[1]["total"], reverse=True)
 
     st.markdown('<div class="dash-card">', unsafe_allow_html=True)
@@ -744,7 +768,7 @@ def render_points(m):
     st.markdown('<div class="dash-card">', unsafe_allow_html=True)
     st.markdown("**💎 Story Points by Developer**")
 
-    devs = [(n, d) for n, d in m["dev_map"].items() if d["sp"] > 0]
+    devs = [(n, d) for n, d in m["dev_map"].items() if d["sp"] > 0 and n not in EXCLUDE_FROM_CARDS]
     devs.sort(key=lambda x: x[1]["sp"], reverse=True)
 
     if devs:
@@ -791,7 +815,10 @@ def render_tickets(m, tickets):
         s = t["status"]
         grouped.setdefault(s, []).append(t)
 
-    for status in STATUS_ORDER:
+    # Show known statuses first, then any unknown ones
+    all_statuses = list(STATUS_ORDER) + [s for s in grouped if s not in STATUS_ORDER]
+
+    for status in all_statuses:
         group = grouped.get(status, [])
         if not group:
             continue
