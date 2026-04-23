@@ -414,7 +414,8 @@ def build_metrics(tickets, sprint_start=None, sprint_days=48):
     for t in tickets:
         name = t["assignee"]
         if name not in dev_map:
-            dev_map[name] = {"total": 0, "done": 0, "active": 0, "blocked": 0, "todo": 0, "sp": 0, "done_sp": 0}
+            dev_map[name] = {"total": 0, "done": 0, "active": 0, "blocked": 0, "todo": 0,
+                             "sp": 0, "done_sp": 0, "active_sp": 0, "blocked_sp": 0, "todo_sp": 0}
         dev_map[name]["total"] += 1
         dev_map[name]["sp"] += t["sp"] or 0
         if t["status"] in DONE_STATUSES:
@@ -422,10 +423,13 @@ def build_metrics(tickets, sprint_start=None, sprint_days=48):
             dev_map[name]["done_sp"] += t["sp"] or 0
         elif t["status"] in BLOCKED_STATUSES:
             dev_map[name]["blocked"] += 1
+            dev_map[name]["blocked_sp"] += t["sp"] or 0
         elif t["status"] in ACTIVE_STATUSES:
             dev_map[name]["active"] += 1
+            dev_map[name]["active_sp"] += t["sp"] or 0
         else:
             dev_map[name]["todo"] += 1
+            dev_map[name]["todo_sp"] += t["sp"] or 0
 
     # Sprint progress
     if sprint_start:
@@ -593,7 +597,7 @@ def render_overview(m, tickets):
     cols = st.columns(8)
     with cols[0]: kpi_card("🎯", "Total", total, "#00d4ff")
     with cols[1]: kpi_card("✅", "Done", done_ct, "#10b981", "Jules def.")
-    with cols[2]: kpi_card("⚡", "True Velocity", m["true_velocity"], "#818cf8", "This sprint")
+    with cols[2]: kpi_card("⚡", "True Velocity", f"{m['true_velocity_sp']} SP", "#818cf8", f"{m['true_velocity']} tickets")
     with cols[3]: kpi_card("⏳", "Remaining", total - done_ct, "#7dd3fc")
     with cols[4]: kpi_card("🚫", "Blocked", blocked_ct, "#f87171")
     with cols[5]: kpi_card("💎", "Total SP", m["total_sp"], "#fb923c")
@@ -609,9 +613,9 @@ def render_overview(m, tickets):
     <div class="dash-card" style="padding:10px 14px;">
         <span style="font-size:11px;color:#818cf8;font-weight:700;">⚡ True Sprint Velocity</span>
         <span style="font-size:11px;color:#475569;margin-left:8px;">Based on resolution date</span>
-        <span style="font-size:11px;color:#64748b;margin-left:16px;">✅ {m['true_velocity']} completed this sprint</span>
+        <span style="font-size:11px;color:#64748b;margin-left:16px;">💎 {m['true_velocity_sp']} SP completed this sprint</span>
+        <span style="font-size:11px;color:#64748b;margin-left:12px;">🎫 {m['true_velocity']} tickets</span>
         <span style="font-size:11px;color:#64748b;margin-left:12px;">📦 {m['pre_sprint_done']} pre-sprint done</span>
-        <span style="font-size:11px;color:#64748b;margin-left:12px;">💎 {m['true_velocity_sp']} SP this sprint</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -720,42 +724,47 @@ def render_burndown(m, sprint_days):
 # ─── VELOCITY TAB ─────────────────────────────────────────
 def render_velocity(m):
     devs = [(n, d) for n, d in m["dev_map"].items() if n not in EXCLUDE_FROM_CARDS]
-    devs.sort(key=lambda x: x[1]["total"], reverse=True)
+    devs.sort(key=lambda x: x[1]["sp"], reverse=True)
 
     st.markdown('<div class="dash-card">', unsafe_allow_html=True)
-    st.markdown("**⚡ Developer Velocity**")
+    st.markdown("**⚡ Developer Velocity** — by Story Points")
     names = [n.split()[0] for n, _ in devs]
     fig = go.Figure()
-    for label, key, color in [("✅ Done","done","#10b981"), ("⚡ Active","active","#38bdf8"), ("🚫 Blocked","blocked","#f87171"), ("📋 Todo","todo","#334155")]:
+    for label, key, color in [("✅ Done SP","done_sp","#10b981"), ("⚡ Active SP","active_sp","#38bdf8"), ("🚫 Blocked SP","blocked_sp","#f87171"), ("📋 Todo SP","todo_sp","#334155")]:
         fig.add_trace(go.Bar(name=label, x=names, y=[d[key] for _, d in devs], marker_color=color,
             hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y}}<extra></extra>"))
     fig.update_layout(barmode="stack", height=260, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="DM Sans", color="#64748b"),
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#94a3b8"), orientation="h", y=-0.15),
-        xaxis=dict(gridcolor="#1e2d47"), yaxis=dict(gridcolor="#1e2d47"),
+        xaxis=dict(gridcolor="#1e2d47"), yaxis=dict(gridcolor="#1e2d47", title=dict(text="Story Points", font=dict(size=10, color="#475569"))),
         margin=dict(l=0, r=0, t=10, b=40))
     st.plotly_chart(fig, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Dev cards
+    # Dev cards — SP based progress
     cards_html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">'
     for name, d in devs:
         color = DEV_COLORS.get(name, "#64748b")
-        pct = round((d["done"] / d["total"]) * 100) if d["total"] else 0
+        sp_pct = round((d["done_sp"] / d["sp"]) * 100) if d["sp"] else 0
         initials = "".join(p[0] for p in name.split()[:2])
         blocked_badge = ""
         if d["blocked"] > 0:
             blocked_badge = f'<span style="font-size:9px;background:rgba(248,113,113,0.15);border:1px solid rgba(248,113,113,0.4);color:#f87171;border-radius:4px;padding:1px 5px;">🚫 {d["blocked"]}</span>'
+        missing_sp_badge = ""
+        no_sp_count = d["total"] - (1 if d["sp"] > 0 else 0)  # rough indicator
+        tickets_with_sp = d["done"] + d["active"] + d["blocked"] + d["todo"]
+        if d["sp"] == 0 and d["total"] > 0:
+            missing_sp_badge = f'<span style="font-size:9px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3);color:#fbbf24;border-radius:4px;padding:1px 5px;">⚠️ No SP</span>'
         cards_html += f"""
         <div class="dev-card" style="flex:1;min-width:140px;background:rgba(13,27,62,0.5);border:1px solid {color}30;border-radius:12px;padding:12px;text-align:center;cursor:default;">
             <div style="width:36px;height:36px;border-radius:50%;background:{color}25;border:2px solid {color};display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-size:13px;font-weight:700;color:{color};">{initials}</div>
             <div style="font-size:12px;font-weight:700;color:#e2e8f0;">{name.split()[0]}</div>
-            <div style="font-size:10px;color:#475569;">{d['done']}/{d['total']} done · {d['sp']} SP</div>
+            <div style="font-size:10px;color:#475569;">{d['done_sp']}/{d['sp']} SP done · {d['done']}/{d['total']} tickets</div>
             <div style="width:100%;height:5px;background:#0d1528;border-radius:3px;margin-top:6px;overflow:hidden;">
-                <div style="width:{pct}%;height:100%;background:linear-gradient(90deg,{color},{color}cc);border-radius:3px;"></div>
+                <div style="width:{sp_pct}%;height:100%;background:linear-gradient(90deg,{color},{color}cc);border-radius:3px;"></div>
             </div>
-            <div style="font-size:10px;color:{color};margin-top:3px;">{pct}%</div>
-            {blocked_badge}
+            <div style="font-size:10px;color:{color};margin-top:3px;">{sp_pct}% SP</div>
+            {blocked_badge}{missing_sp_badge}
         </div>
         """
     cards_html += '</div>'
