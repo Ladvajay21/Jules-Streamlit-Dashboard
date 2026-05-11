@@ -7,7 +7,9 @@ import requests
 import re
 import os
 import random
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 JIRA_EMAIL    = os.environ.get("JIRA_EMAIL", "")
 JIRA_TOKEN    = os.environ.get("JIRA_API_TOKEN", "").strip()
@@ -76,10 +78,39 @@ def fetch_tickets():
                           "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None})
         if start_at + len(d.get("issues", [])) >= d.get("total", 0): break
         start_at += len(d.get("issues", []))
+
+    # Catch-all verification: re-fetch all sprint tickets to fix stale/missing data
+    existing = {t["key"]: t for t in all_t}
+    v_start = 0
+    while True:
+        try:
+            vr = requests.get(url, headers=jira_headers(), auth=jira_auth(), timeout=30,
+                              params={"jql": f"project = {PROJECT} AND sprint in openSprints() ORDER BY key ASC",
+                                      "maxResults": 200, "startAt": v_start,
+                                      "fields": "summary,status,assignee,customfield_10024"})
+            vr.raise_for_status()
+            vd = vr.json()
+            for i in vd.get("issues", []):
+                f = i.get("fields", {})
+                key = i["key"]
+                new_status = f.get("status", {}).get("name", "Unknown")
+                if key in existing:
+                    existing[key]["status"] = new_status
+                else:
+                    t = {"key": key, "summary": clean_title(f.get("summary", "")),
+                         "status": new_status,
+                         "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                         "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None}
+                    all_t.append(t)
+                    existing[key] = t
+            if v_start + len(vd.get("issues", [])) >= vd.get("total", 0): break
+            v_start += len(vd.get("issues", []))
+        except Exception:
+            break
     return all_t
 
 def build_metrics(tickets, sprint_start, sprint_days):
-    today = date.today()
+    today = datetime.now(IST).date()
     done_t = [t for t in tickets if t["status"] in DONE_STATUSES]
     blocked_t = [t for t in tickets if t["status"] in BLOCKED_STATUSES]
     dev_map = {}
@@ -98,7 +129,7 @@ def build_metrics(tickets, sprint_start, sprint_days):
             "dev_map": dev_map}
 
 def post_daily_slack(m, tickets, sprint_name, sprint_days):
-    today_str = date.today().strftime("%A, %d %b %Y")
+    today_str = datetime.now(IST).strftime("%A, %d %b %Y")
     days_left = sprint_days - m["current_day"]
     total, done_ct, blocked_ct = m["total"], len(m["done_tickets"]), len(m["blocked_tickets"])
     pct = round(done_ct / total * 100) if total else 0
