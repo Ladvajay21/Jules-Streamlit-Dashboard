@@ -41,6 +41,20 @@ DEV_COLORS = {
     "Unassigned":    "#64748b",
 }
 
+# Auto-assign palette for any new devs not in DEV_COLORS
+_AUTO_COLORS = ["#38bdf8", "#facc15", "#a78bfa", "#f87171", "#2dd4bf", "#e879f9", "#84cc16"]
+_auto_color_idx = 0
+
+def get_dev_color(name):
+    global _auto_color_idx
+    if name in DEV_COLORS:
+        return DEV_COLORS[name]
+    # Auto-assign a color for new devs
+    color = _AUTO_COLORS[_auto_color_idx % len(_AUTO_COLORS)]
+    DEV_COLORS[name] = color
+    _auto_color_idx += 1
+    return color
+
 STATUS_COLORS = {
     "Done": "#10b981", "PO/QA VALID": "#34d399", "PO/QA Test run": "#6ee7b7",
     "Demo": "#a7f3d0", "In Production": "#059669", "CS Reviewed": "#065f46",
@@ -274,8 +288,9 @@ def get_active_sprint_dates(sprints):
                 return start, end, name
             except Exception:
                 pass
-    # Fallback defaults
-    return date(2026, 2, 24), date(2026, 4, 12), "Release Sprint 3"
+    # Fallback: if no active sprint found, use sensible dynamic defaults
+    today = date.today()
+    return today - timedelta(days=7), today + timedelta(days=7), "Sprint (fallback)"
 
 
 # ─── FETCH TICKETS ────────────────────────────────────────
@@ -744,7 +759,7 @@ def render_velocity(m):
     # Dev cards — SP based progress
     cards_html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">'
     for name, d in devs:
-        color = DEV_COLORS.get(name, "#64748b")
+        color = get_dev_color(name)
         sp_pct = round((d["done_sp"] / d["sp"]) * 100) if d["sp"] else 0
         initials = "".join(p[0] for p in name.split()[:2])
         blocked_badge = ""
@@ -796,7 +811,7 @@ def render_points(m):
 
     # SP summary table
     for name, d in devs:
-        color = DEV_COLORS.get(name, "#64748b")
+        color = get_dev_color(name)
         pct = round((d["done_sp"] / d["sp"]) * 100) if d["sp"] else 0
         st.markdown(f"""
         <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(0,212,255,0.04);">
@@ -836,7 +851,7 @@ def render_tickets(m, tickets):
         rows_html = ""
         for t in sorted(group, key=lambda x: x["key"]):
             sp_badge = f'<span style="font-size:9px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;padding:1px 5px;margin-left:auto;">{t["sp"]} SP</span>' if t["sp"] else ""
-            dev_color = DEV_COLORS.get(t["assignee"], "#64748b")
+            dev_color = get_dev_color(t["assignee"])
             assignee_badge = f'<span style="font-size:9px;color:{dev_color};margin-left:6px;">{t["assignee"].split()[0]}</span>'
 
             carried_badge = ""
@@ -859,6 +874,253 @@ def render_tickets(m, tickets):
             {rows_html}
         </div>
         """)
+
+
+# ─── DAILY STANDUP REPORT ─────────────────────────────────
+def render_daily_report(m, tickets, sprint_name, sprint_start, sprint_days):
+    today_str = date.today().strftime("%A, %d %b %Y")
+    days_left = sprint_days - m["current_day"]
+    pct = round(len(m["done_tickets"]) / m["total"] * 100) if m["total"] else 0
+
+    # Header
+    st.html(f"""
+    <div style="background:linear-gradient(135deg,rgba(0,212,255,0.08),rgba(129,140,248,0.08));border:1px solid rgba(0,212,255,0.15);border-radius:16px;padding:20px 24px;margin-bottom:16px;">
+        <div style="font-size:10px;color:#00d4ff;text-transform:uppercase;letter-spacing:2px;font-weight:600;margin-bottom:6px;">☀️ DAILY STANDUP REPORT</div>
+        <div style="font-size:22px;font-weight:900;color:#e2e8f0;">{today_str}</div>
+        <div style="font-size:12px;color:#475569;margin-top:4px;">
+            {sprint_name} · Day {m['current_day']}/{sprint_days} · {days_left} days left · {pct}% done · {m['done_sp']}/{m['total_sp']} SP
+        </div>
+    </div>
+    """)
+
+    # ── AIM OF THE DAY section ──
+    aim_tickets = [t for t in tickets if t["status"] == "AIM OF THE DAY"]
+    aim_by_dev = {}
+    for t in aim_tickets:
+        aim_by_dev.setdefault(t["assignee"], []).append(t)
+
+    st.html(f"""
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#fbbf24;margin:16px 0 10px;display:flex;align-items:center;gap:8px;">
+        🎯 AIM OF THE DAY — {len(aim_tickets)} tickets
+        <span style="flex:1;height:1px;background:linear-gradient(90deg,rgba(251,191,36,0.3),transparent);"></span>
+    </div>
+    """)
+
+    if not aim_tickets:
+        st.html('<div style="color:#475569;font-size:12px;padding:12px;font-style:italic;">No tickets in Aim of the Day right now.</div>')
+    else:
+        for dev_name in sorted(aim_by_dev.keys()):
+            dev_tickets = aim_by_dev[dev_name]
+            color = get_dev_color(dev_name)
+            initials = "".join(p[0] for p in dev_name.split()[:2])
+            rows = ""
+            for t in dev_tickets:
+                sp_badge = f'<span style="font-size:9px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;padding:1px 5px;">{t["sp"]} SP</span>' if t["sp"] else '<span style="font-size:9px;color:#475569;">—</span>'
+                rows += f'<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(0,212,255,0.04);"><a href="{JIRA_BASE}/browse/{t["key"]}" target="_blank" style="font-family:monospace;font-size:11px;color:#00d4ff;text-decoration:none;">{t["key"]}</a><span style="font-size:12px;color:#cbd5e1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{t["summary"]}</span>{sp_badge}</div>'
+
+            st.html(f"""
+            <div style="background:rgba(13,27,62,0.4);border:1px solid {color}25;border-radius:12px;padding:14px 16px;margin-bottom:10px;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                    <div style="width:32px;height:32px;border-radius:50%;background:{color}25;border:2px solid {color};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:{color};">{initials}</div>
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:{color};">{dev_name}</div>
+                        <div style="font-size:10px;color:#475569;">{len(dev_tickets)} ticket{"s" if len(dev_tickets) != 1 else ""} aimed for today</div>
+                    </div>
+                </div>
+                {rows}
+            </div>
+            """)
+
+    # ── DEVELOPER SCORECARD ──
+    st.html("""
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#818cf8;margin:20px 0 10px;display:flex;align-items:center;gap:8px;">
+        📊 DEVELOPER SCORECARD
+        <span style="flex:1;height:1px;background:linear-gradient(90deg,rgba(129,140,248,0.3),transparent);"></span>
+    </div>
+    """)
+
+    devs = [(n, d) for n, d in m["dev_map"].items() if n not in EXCLUDE_FROM_CARDS]
+    devs.sort(key=lambda x: x[1]["sp"], reverse=True)
+
+    scorecard_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">'
+    for name, d in devs:
+        color = get_dev_color(name)
+        initials = "".join(p[0] for p in name.split()[:2])
+        sp_pct = round((d["done_sp"] / d["sp"]) * 100) if d["sp"] else 0
+        ticket_pct = round((d["done"] / d["total"]) * 100) if d["total"] else 0
+        aim_count = len(aim_by_dev.get(name, []))
+
+        # Status bar
+        bars_html = ""
+        for label, count, bc in [("Done", d["done"], "#10b981"), ("Active", d["active"], "#38bdf8"), ("Blocked", d["blocked"], "#f87171"), ("To Do", d["todo"], "#334155")]:
+            if count > 0:
+                bars_html += f'<span style="font-size:9px;color:{bc};margin-right:8px;">{label}: {count}</span>'
+
+        blocked_alert = ""
+        if d["blocked"] > 0:
+            blocked_alert = f'<div style="margin-top:6px;font-size:9px;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.3);color:#f87171;border-radius:6px;padding:3px 8px;animation:borderGlow 2s ease-in-out infinite;">🚫 {d["blocked"]} blocked</div>'
+
+        aim_badge = ""
+        if aim_count > 0:
+            aim_badge = f'<div style="margin-top:4px;font-size:9px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.25);color:#fbbf24;border-radius:6px;padding:3px 8px;">🎯 {aim_count} aimed today</div>'
+
+        scorecard_html += f"""
+        <div style="background:rgba(13,27,62,0.5);border:1px solid {color}20;border-radius:14px;padding:16px;transition:all 0.25s ease;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                <div style="width:40px;height:40px;border-radius:50%;background:{color}20;border:2px solid {color};display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:{color};">{initials}</div>
+                <div>
+                    <div style="font-size:14px;font-weight:700;color:#e2e8f0;">{name}</div>
+                    <div style="font-size:10px;color:#475569;">{d['total']} tickets · {d['sp']} SP assigned</div>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+                <div style="text-align:center;">
+                    <div style="font-size:18px;font-weight:900;color:#10b981;">{d['done_sp']}</div>
+                    <div style="font-size:9px;color:#475569;">SP Done</div>
+                </div>
+                <div style="text-align:center;">
+                    <div style="font-size:18px;font-weight:900;color:{color};">{d['sp'] - d['done_sp']}</div>
+                    <div style="font-size:9px;color:#475569;">SP Left</div>
+                </div>
+                <div style="text-align:center;">
+                    <div style="font-size:18px;font-weight:900;color:#7dd3fc;">{d['done']}</div>
+                    <div style="font-size:9px;color:#475569;">Tickets Done</div>
+                </div>
+            </div>
+            <div style="width:100%;height:6px;background:#0d1528;border-radius:3px;overflow:hidden;margin-bottom:6px;">
+                <div style="width:{sp_pct}%;height:100%;background:linear-gradient(90deg,{color},{color}cc);border-radius:3px;"></div>
+            </div>
+            <div style="font-size:10px;color:{color};text-align:center;">{sp_pct}% SP complete</div>
+            <div style="margin-top:6px;">{bars_html}</div>
+            {blocked_alert}{aim_badge}
+        </div>
+        """
+    scorecard_html += '</div><style>@keyframes borderGlow{0%,100%{border-color:rgba(248,113,113,0.15)}50%{border-color:rgba(248,113,113,0.5)}}</style>'
+    st.html(scorecard_html)
+
+    # ── Post to Slack button ──
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2 = st.columns([4, 1])
+    with col2:
+        if st.button("📣 Post to Slack", key="daily_slack"):
+            ok, msg = post_daily_slack(m, tickets, sprint_name, sprint_days)
+            st.toast("✅ Daily report posted to Slack!" if ok else f"❌ {msg}", icon="📣" if ok else "⚠️")
+
+
+def post_daily_slack(m, tickets, sprint_name, sprint_days):
+    """Post a rich daily standup report to Slack — exact Jules Bot format."""
+    if not SLACK_WEBHOOK:
+        return False, "No webhook configured"
+
+    import random
+    today_str = date.today().strftime("%A, %d %b %Y")
+    days_left = sprint_days - m["current_day"]
+    total = m["total"]
+    done_ct = len(m["done_tickets"])
+    blocked_ct = len(m["blocked_tickets"])
+    pct = round(done_ct / total * 100) if total else 0
+    time_pct = round(m["current_day"] / sprint_days * 100) if sprint_days else 0
+    greeting = random.choice(GREETINGS)
+    tip = random.choice(SPRINT_TIPS)
+
+    # ── Progress bar builder using colored blocks ──
+    def make_bar(percent, filled_emoji="🟩", empty_emoji="⬜", width=20):
+        filled = round(percent / 100 * width)
+        return filled_emoji * filled + empty_emoji * (width - filled)
+
+    # ── Sprint health ──
+    if pct >= time_pct * 0.85:
+        health_emoji, health_text = "🟢", "On Track — Sprint is progressing well"
+    elif pct >= time_pct * 0.65:
+        health_emoji, health_text = "🟡", "Slight Risk — Keep an eye on velocity"
+    else:
+        health_emoji, health_text = "🔴", "Behind Schedule — Needs attention"
+
+    tickets_per_day = round((total - done_ct) / max(days_left, 1), 1) if days_left > 0 else 0
+
+    # ── Dev color mapping for Slack blocks (auto-assigns for new devs) ──
+    _slack_blocks = {"Nikita Vaidya": "🟪", "Satadru Roy": "🟥", "Rizky Ario": "🟧", "Jay Pitroda": "🟦"}
+    _auto_blocks = ["🟨", "🟫", "🟩", "⬛"]
+    _ab_idx = [0]
+    def get_block(n):
+        if n not in _slack_blocks:
+            _slack_blocks[n] = _auto_blocks[_ab_idx[0] % len(_auto_blocks)]
+            _ab_idx[0] += 1
+        return _slack_blocks[n]
+
+    blocks = [
+        # Header
+        {"type": "header", "text": {"type": "plain_text", "text": f"🚀 Jules Daily Standup — {today_str}"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"{sprint_name}  ·  Day {m['current_day']} of {sprint_days}  ·  {greeting}"}]},
+
+        # Sprint Burndown
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*📉 Sprint Burndown*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text":
+            f"`Time elapsed` {make_bar(time_pct, '🟥', '⬜')}  *{time_pct}%*\n"
+            f"`Work done   ` {make_bar(pct, '🟩', '⬜')}  *{pct}%*"}},
+        {"type": "context", "elements": [{"type": "mrkdwn",
+            "text": f"{health_emoji} *{health_text}*\nNeed ~{tickets_per_day} tickets/day to finish  ·  {days_left} days left"}]},
+
+        {"type": "divider"},
+
+        # Sprint Snapshot
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*🗂️ Sprint Snapshot*"}},
+        {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": f"✅ *Done*\n{done_ct} / {total} tickets"},
+            {"type": "mrkdwn", "text": f"💎 *Story Points*\n{m['done_sp']} / {m['total_sp']} SP"},
+            {"type": "mrkdwn", "text": f"🚫 *Blocked*\n{blocked_ct} tickets"},
+            {"type": "mrkdwn", "text": f"🗓️ *Days Left*\n{days_left} of {sprint_days} days"},
+        ]},
+
+        {"type": "divider"},
+    ]
+
+    # ── Team Velocity ──
+    devs = [(n, d) for n, d in m["dev_map"].items() if n not in EXCLUDE_FROM_CARDS]
+    devs.sort(key=lambda x: x[1]["done"], reverse=True)
+
+    velocity_lines = ["*👥 Team Velocity*\n"]
+    for name, d in devs:
+        first = name.split()[0]
+        ticket_pct = round((d["done"] / d["total"]) * 100) if d["total"] else 0
+        block = get_block(name)
+        bar = make_bar(ticket_pct, block, "⬜", 10)
+        blocked_flag = f"🚫 {d['blocked']} Blocked" if d["blocked"] > 0 else "✅ Clear"
+        velocity_lines.append(
+            f"{first}  {bar}  *{ticket_pct}%*  {d['done']}/{d['total']} tickets · {d['done_sp']}/{d['sp']} SP  {blocked_flag}"
+        )
+
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(velocity_lines)}})
+
+    # ── Active Blockers ──
+    if m["blocked_tickets"]:
+        blocks.append({"type": "divider"})
+        blocker_lines = [f"*🚫 Active Blockers ({blocked_ct})*\n"]
+        for t in m["blocked_tickets"][:8]:
+            first = t["assignee"].split()[0]
+            summary = t["summary"][:60] + ("..." if len(t["summary"]) > 60 else "")
+            blocker_lines.append(
+                f"`{t['key']}`  →  {summary}  —  *{first}*"
+            )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(blocker_lines)}})
+
+    # ── Tip of the Day ──
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"💡 *Tip of the Day*  —  {tip}"}]})
+
+    # ── Action Buttons ──
+    blocks.append({"type": "actions", "elements": [
+        {"type": "button", "text": {"type": "plain_text", "text": "📊 Live Dashboard"},
+         "url": "https://julesdashboard.streamlit.app", "style": "primary"},
+        {"type": "button", "text": {"type": "plain_text", "text": "📋 Jira Board"},
+         "url": f"{JIRA_BASE}/jira/software/c/projects/{PROJECT}/boards"},
+    ]})
+
+    try:
+        resp = requests.post(SLACK_WEBHOOK, json={"blocks": blocks}, timeout=15)
+        return resp.status_code == 200, resp.text
+    except Exception as e:
+        return False, str(e)
 
 
 # ─── MAIN APP ─────────────────────────────────────────────
@@ -969,14 +1231,15 @@ def main():
                 st.rerun()
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Overview", "🔥 Burndown", "⚡ Velocity", "💎 Story Points", "🎫 All Tickets"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Overview", "🔥 Burndown", "⚡ Velocity", "💎 Story Points", "🎫 All Tickets", "☀️ Daily Standup"
     ])
     with tab1: render_overview(m, filtered_tickets)
     with tab2: render_burndown(m, sprint_days)
     with tab3: render_velocity(m)
     with tab4: render_points(m)
     with tab5: render_tickets(m, filtered_tickets)
+    with tab6: render_daily_report(m, filtered_tickets, sprint_name, sprint_start, sprint_days)
 
     # Footer
     st.markdown(f"""
