@@ -62,51 +62,28 @@ def fetch_sprint_info():
     return date.today(), date.today(), "Sprint"
 
 def fetch_tickets():
-    url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    # Use v2 API which has reliable startAt/total pagination (v3 caps at 100)
+    url = f"{JIRA_BASE}/rest/api/2/search"
     all_t, start_at = [], 0
     while True:
         r = requests.get(url, headers=jira_headers(), auth=jira_auth(), timeout=30,
-                         params={"jql": f"project = {PROJECT} AND sprint in openSprints()", "maxResults": 200,
-                                 "startAt": start_at, "fields": "summary,status,assignee,customfield_10024"})
+                         params={"jql": f"project = {PROJECT} AND sprint in openSprints()",
+                                 "maxResults": 100, "startAt": start_at,
+                                 "fields": "summary,status,assignee,customfield_10024"})
         r.raise_for_status()
         d = r.json()
-        for i in d.get("issues", []):
+        issues = d.get("issues", [])
+        total = d.get("total", 0)
+        print(f"   Fetched {start_at + len(issues)}/{total} tickets...")
+        for i in issues:
             f = i.get("fields", {})
             all_t.append({"key": i["key"], "summary": clean_title(f.get("summary", "")),
                           "status": f.get("status", {}).get("name", "Unknown"),
                           "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
                           "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None})
-        if start_at + len(d.get("issues", [])) >= d.get("total", 0): break
-        start_at += len(d.get("issues", []))
-
-    # Catch-all verification: re-fetch all sprint tickets to fix stale/missing data
-    existing = {t["key"]: t for t in all_t}
-    v_start = 0
-    while True:
-        try:
-            vr = requests.get(url, headers=jira_headers(), auth=jira_auth(), timeout=30,
-                              params={"jql": f"project = {PROJECT} AND sprint in openSprints() ORDER BY key ASC",
-                                      "maxResults": 200, "startAt": v_start,
-                                      "fields": "summary,status,assignee,customfield_10024"})
-            vr.raise_for_status()
-            vd = vr.json()
-            for i in vd.get("issues", []):
-                f = i.get("fields", {})
-                key = i["key"]
-                new_status = f.get("status", {}).get("name", "Unknown")
-                if key in existing:
-                    existing[key]["status"] = new_status
-                else:
-                    t = {"key": key, "summary": clean_title(f.get("summary", "")),
-                         "status": new_status,
-                         "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
-                         "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None}
-                    all_t.append(t)
-                    existing[key] = t
-            if v_start + len(vd.get("issues", [])) >= vd.get("total", 0): break
-            v_start += len(vd.get("issues", []))
-        except Exception:
+        if start_at + len(issues) >= total or not issues:
             break
+        start_at += len(issues)
     return all_t
 
 def build_metrics(tickets, sprint_start, sprint_days):
