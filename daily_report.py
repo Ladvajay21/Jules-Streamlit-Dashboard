@@ -62,35 +62,58 @@ def fetch_sprint_info():
     return date.today(), date.today(), "Sprint"
 
 def fetch_tickets():
-    url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    # Use Agile API to fetch directly from the sprint board (matches what you see in Jira)
+    # Step 1: Get board ID
+    boards_url = f"{JIRA_BASE}/rest/agile/1.0/board"
+    r = requests.get(boards_url, auth=jira_auth(), headers=jira_headers(),
+                     params={"projectKeyOrId": PROJECT, "maxResults": 10}, timeout=15)
+    r.raise_for_status()
+    boards = r.json().get("values", [])
+    if not boards:
+        print("   ❌ No boards found")
+        return []
+    board_id = boards[0]["id"]
+    print(f"   Board ID: {board_id}")
+
+    # Step 2: Get active sprint ID
+    sprints_url = f"{JIRA_BASE}/rest/agile/1.0/board/{board_id}/sprint"
+    r2 = requests.get(sprints_url, auth=jira_auth(), headers=jira_headers(),
+                      params={"state": "active", "maxResults": 5}, timeout=15)
+    r2.raise_for_status()
+    active_sprints = [s for s in r2.json().get("values", []) if s.get("state") == "active"]
+    if not active_sprints:
+        print("   ❌ No active sprint found")
+        return []
+    sprint_id = active_sprints[0]["id"]
+    print(f"   Sprint: {active_sprints[0].get('name', '?')} (ID: {sprint_id})")
+
+    # Step 3: Fetch all issues from the sprint (Agile API has proper pagination)
+    issues_url = f"{JIRA_BASE}/rest/agile/1.0/sprint/{sprint_id}/issue"
     all_t, start_at = [], 0
     seen_keys = set()
     while True:
-        r = requests.get(url, headers=jira_headers(), auth=jira_auth(), timeout=30,
-                         params={"jql": f"project = {PROJECT} AND sprint in openSprints()",
-                                 "maxResults": 100, "startAt": start_at,
-                                 "fields": "summary,status,assignee,customfield_10024"})
-        r.raise_for_status()
-        d = r.json()
+        r3 = requests.get(issues_url, auth=jira_auth(), headers=jira_headers(), timeout=30,
+                          params={"maxResults": 100, "startAt": start_at,
+                                  "fields": "summary,status,assignee,customfield_10024"})
+        r3.raise_for_status()
+        d = r3.json()
         issues = d.get("issues", [])
+        total = d.get("total", 0)
+        print(f"   Fetched {start_at + len(issues)}/{total} tickets...")
         if not issues:
             break
-        new_count = 0
         for i in issues:
             if i["key"] in seen_keys:
                 continue
             seen_keys.add(i["key"])
-            new_count += 1
             f = i.get("fields", {})
             all_t.append({"key": i["key"], "summary": clean_title(f.get("summary", "")),
                           "status": f.get("status", {}).get("name", "Unknown"),
                           "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
                           "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None})
-        print(f"   Page: startAt={start_at}, got={len(issues)}, new={new_count}, total_so_far={len(all_t)}")
-        # Stop if no new unique tickets found (API is cycling)
-        if new_count == 0:
-            break
         start_at += len(issues)
+        if start_at >= total:
+            break
     print(f"   Total unique tickets: {len(all_t)}")
     return all_t
 
