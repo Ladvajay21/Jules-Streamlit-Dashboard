@@ -62,9 +62,9 @@ def fetch_sprint_info():
     return date.today(), date.today(), "Sprint"
 
 def fetch_tickets():
-    # Use v2 API which has reliable startAt/total pagination (v3 caps at 100)
-    url = f"{JIRA_BASE}/rest/api/2/search"
+    url = f"{JIRA_BASE}/rest/api/3/search/jql"
     all_t, start_at = [], 0
+    seen_keys = set()
     while True:
         r = requests.get(url, headers=jira_headers(), auth=jira_auth(), timeout=30,
                          params={"jql": f"project = {PROJECT} AND sprint in openSprints()",
@@ -73,17 +73,23 @@ def fetch_tickets():
         r.raise_for_status()
         d = r.json()
         issues = d.get("issues", [])
-        total = d.get("total", 0)
-        print(f"   Fetched {start_at + len(issues)}/{total} tickets...")
+        total = d.get("total", 999999)  # Default high so pagination continues
+        print(f"   Page: startAt={start_at}, got={len(issues)}, total={d.get('total','MISSING')}")
+        if not issues:
+            break
         for i in issues:
+            if i["key"] in seen_keys:
+                continue
+            seen_keys.add(i["key"])
             f = i.get("fields", {})
             all_t.append({"key": i["key"], "summary": clean_title(f.get("summary", "")),
                           "status": f.get("status", {}).get("name", "Unknown"),
                           "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
                           "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None})
-        if start_at + len(issues) >= total or not issues:
-            break
         start_at += len(issues)
+        if start_at >= total:
+            break
+    print(f"   Total unique tickets: {len(all_t)}")
     return all_t
 
 def build_metrics(tickets, sprint_start, sprint_days):
