@@ -73,22 +73,24 @@ def fetch_tickets():
         r.raise_for_status()
         d = r.json()
         issues = d.get("issues", [])
-        total = d.get("total", 999999)  # Default high so pagination continues
-        print(f"   Page: startAt={start_at}, got={len(issues)}, total={d.get('total','MISSING')}")
         if not issues:
             break
+        new_count = 0
         for i in issues:
             if i["key"] in seen_keys:
                 continue
             seen_keys.add(i["key"])
+            new_count += 1
             f = i.get("fields", {})
             all_t.append({"key": i["key"], "summary": clean_title(f.get("summary", "")),
                           "status": f.get("status", {}).get("name", "Unknown"),
                           "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
                           "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None})
-        start_at += len(issues)
-        if start_at >= total:
+        print(f"   Page: startAt={start_at}, got={len(issues)}, new={new_count}, total_so_far={len(all_t)}")
+        # Stop if no new unique tickets found (API is cycling)
+        if new_count == 0:
             break
+        start_at += len(issues)
     print(f"   Total unique tickets: {len(all_t)}")
     return all_t
 
