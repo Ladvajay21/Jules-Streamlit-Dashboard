@@ -225,15 +225,15 @@ def post_daily_slack(m, tickets, sprint_name, sprint_days):
         done_gl = [t for t in go_live_tickets if t["status"] in DONE_STATUSES]
         blocks.append({"type": "divider"})
         gl_lines = [f"*\U0001f6a6 Go-Live Blockers ({len(go_live_tickets)} total \u00b7 {len(open_gl)} open \u00b7 {len(done_gl)} resolved)*\n"]
-        for t in go_live_tickets[:10]:
+        for t in go_live_tickets[:20]:
             first = t["assignee"].split()[0]
             summary = t["summary"][:55] + ("..." if len(t["summary"]) > 55 else "")
             status_icon = "\u2705" if t["status"] in DONE_STATUSES else "\U0001f534"
             gl_lines.append(
                 f"{status_icon} `{t['key']}`  \u2192  {summary}  \u2014  *{first}*  _{t['status']}_"
             )
-        if len(go_live_tickets) > 10:
-            gl_lines.append(f"_... and {len(go_live_tickets) - 10} more_")
+        if len(go_live_tickets) > 20:
+            gl_lines.append(f"_... and {len(go_live_tickets) - 20} more_")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(gl_lines)}})
 
     blocks.append({"type":"divider"})
