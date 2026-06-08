@@ -117,6 +117,42 @@ def fetch_tickets():
     print(f"   Total unique tickets: {len(all_t)}")
     return all_t
 
+def fetch_go_live_blocker_tickets():
+    """Fetch tickets labelled 'go-live-blocker' from the current open sprint."""
+    url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    all_tickets = []
+    start_at = 0
+    while True:
+        params = {
+            "jql": f'project = {PROJECT} AND sprint in openSprints() AND labels = "GoLiveBlocker" ORDER BY created DESC',
+            "maxResults": 100,
+            "startAt": start_at,
+            "fields": "summary,status,assignee,customfield_10024,priority",
+        }
+        try:
+            resp = requests.get(url, headers=jira_headers(), auth=jira_auth(), params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            issues = data.get("issues", [])
+            for issue in issues:
+                f = issue.get("fields", {})
+                all_tickets.append({
+                    "key": issue["key"],
+                    "summary": clean_title(f.get("summary", "")),
+                    "status": f.get("status", {}).get("name", "Unknown"),
+                    "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                    "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
+                    "priority": (f.get("priority") or {}).get("name", ""),
+                })
+            if start_at + len(issues) >= data.get("total", 0):
+                break
+            start_at += len(issues)
+        except Exception as e:
+            print(f"  Warn (go-live-blocker fetch): {e}")
+            break
+    print(f"   Go-live blocker tickets: {len(all_tickets)}")
+    return all_tickets
+
 def build_metrics(tickets, sprint_start, sprint_days):
     today = datetime.now(IST).date()
     done_t = [t for t in tickets if t["status"] in DONE_STATUSES]
@@ -181,6 +217,25 @@ def post_daily_slack(m, tickets, sprint_name, sprint_days):
             s = t["summary"][:60]+("..." if len(t["summary"])>60 else "")
             bl.append(f"`{t['key']}`  \u2192  {s}  \u2014  *{t['assignee'].split()[0]}*")
         blocks.append({"type":"section","text":{"type":"mrkdwn","text":"\n".join(bl)}})
+
+    # ── Go-Live Blocker Tickets ──
+    go_live_tickets = fetch_go_live_blocker_tickets()
+    if go_live_tickets:
+        open_gl = [t for t in go_live_tickets if t["status"] not in DONE_STATUSES]
+        done_gl = [t for t in go_live_tickets if t["status"] in DONE_STATUSES]
+        blocks.append({"type": "divider"})
+        gl_lines = [f"*\U0001f6a6 Go-Live Blockers ({len(go_live_tickets)} total \u00b7 {len(open_gl)} open \u00b7 {len(done_gl)} resolved)*\n"]
+        for t in go_live_tickets[:10]:
+            first = t["assignee"].split()[0]
+            summary = t["summary"][:55] + ("..." if len(t["summary"]) > 55 else "")
+            status_icon = "\u2705" if t["status"] in DONE_STATUSES else "\U0001f534"
+            gl_lines.append(
+                f"{status_icon} `{t['key']}`  \u2192  {summary}  \u2014  *{first}*  _{t['status']}_"
+            )
+        if len(go_live_tickets) > 10:
+            gl_lines.append(f"_... and {len(go_live_tickets) - 10} more_")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(gl_lines)}})
+
     blocks.append({"type":"divider"})
     blocks.append({"type":"context","elements":[{"type":"mrkdwn","text":f"\U0001f4a1 *Tip of the Day*  \u2014  {tip}"}]})
     blocks.append({"type":"actions","elements":[
