@@ -118,7 +118,7 @@ def fetch_tickets():
     return all_t
 
 def fetch_go_live_blocker_tickets():
-    """Fetch tickets labelled 'go-live-blocker' from the current open sprint."""
+    """Fetch tickets labelled 'GoLiveBlocker' from the current open sprint."""
     url = f"{JIRA_BASE}/rest/api/3/search/jql"
     all_tickets = []
     start_at = 0
@@ -127,7 +127,8 @@ def fetch_go_live_blocker_tickets():
             "jql": f'project = {PROJECT} AND sprint in openSprints() AND labels = "GoLiveBlocker" ORDER BY created DESC',
             "maxResults": 100,
             "startAt": start_at,
-            "fields": "summary,status,assignee,customfield_10024,priority",
+            # ✅ Added customfield_10072 = Company Name field
+            "fields": "summary,status,assignee,customfield_10024,priority,customfield_10072",
         }
         try:
             resp = requests.get(url, headers=jira_headers(), auth=jira_auth(), params=params, timeout=30)
@@ -143,6 +144,8 @@ def fetch_go_live_blocker_tickets():
                     "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
                     "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
                     "priority": (f.get("priority") or {}).get("name", ""),
+                    # ✅ Company Name — customfield_10072 is a multi-value string array
+                    "companies": f.get("customfield_10072") or [],
                 })
             if start_at + len(issues) >= data.get("total", 0):
                 break
@@ -229,8 +232,10 @@ def post_daily_slack(m, tickets, sprint_name, sprint_days):
             first = t["assignee"].split()[0]
             summary = t["summary"][:55] + ("..." if len(t["summary"]) > 55 else "")
             status_icon = "\u2705" if t["status"] in DONE_STATUSES else "\U0001f534"
+            # ✅ Show Company Name if available
+            company_tag = f"  \U0001f3e2 {', '.join(t['companies'])}" if t.get("companies") else ""
             gl_lines.append(
-                f"{status_icon} `{t['key']}`  \u2192  {summary}  \u2014  *{first}*  _{t['status']}_"
+                f"{status_icon} `{t['key']}`  \u2192  {summary}  \u2014  *{first}*  _{t['status']}_{company_tag}"
             )
         if len(go_live_tickets) > 20:
             gl_lines.append(f"_... and {len(go_live_tickets) - 20} more_")
