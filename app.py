@@ -580,7 +580,113 @@ def fetch_all_sprints_tickets():
         except Exception:
             break
 
+    # ── 3. Batch-fetch PR links for all tickets via Jira dev-info API ──
+    pr_map = {}  # key -> list of {"title": ..., "url": ..., "state": ...}
+    for ticket in all_tickets:
+        try:
+            dev_url = (
+                f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail"
+                f"?issueId={ticket['key']}&applicationType=github&dataType=pullrequest"
+            )
+            # Jira dev-info needs the numeric issue ID, not the key — fetch it
+            # We'll use the search result's id field; re-query per ticket only if needed
+            # Use the simpler endpoint that accepts issue key via a different param
+            dev_url2 = (
+                f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
+                f"?issueId={ticket['key']}&applicationType=github&dataType=pullrequest"
+            )
+            dr = requests.get(dev_url2, auth=jira_auth(), headers=jira_headers(), timeout=10)
+            if dr.status_code == 200:
+                detail = dr.json().get("detail", [])
+                prs = []
+                for d in detail:
+                    for pr in d.get("pullRequests", []):
+                        prs.append({
+                            "title": pr.get("name", pr.get("id", "PR")),
+                            "url": pr.get("url", ""),
+                            "state": pr.get("status", pr.get("state", "")),
+                        })
+                if prs:
+                    pr_map[ticket["key"]] = prs
+        except Exception:
+            pass
+
+    # Attach PR data to each ticket
+    for ticket in all_tickets:
+        ticket["pull_requests"] = pr_map.get(ticket["key"], [])
+
     return all_tickets, all_sprint_meta
+
+
+# ─── FETCH PR FOR A SINGLE ISSUE (uses numeric issue ID) ──
+@st.cache_data(ttl=600)
+def fetch_prs_for_issues(issue_keys_tuple):
+    """
+    Fetch PR links for a tuple of issue keys using Jira's dev-status API.
+    Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
+    The dev-status endpoint needs the numeric Jira issue ID, so we first
+    resolve keys → IDs, then call the dev-status endpoint in bulk.
+    """
+    if not issue_keys_tuple:
+        return {}
+
+    pr_map = {}
+
+    # Step 1: resolve issue keys to numeric IDs
+    search_url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    key_to_id = {}
+    keys_list = list(issue_keys_tuple)
+
+    for batch_start in range(0, len(keys_list), 100):
+        batch = keys_list[batch_start: batch_start + 100]
+        jql = "issueKey in (" + ",".join(batch) + ")"
+        try:
+            r = requests.get(
+                search_url, auth=jira_auth(), headers=jira_headers(),
+                params={"jql": jql, "maxResults": 100, "fields": "id"},
+                timeout=20,
+            )
+            r.raise_for_status()
+            for iss in r.json().get("issues", []):
+                key_to_id[iss["key"]] = iss["id"]
+        except Exception:
+            pass
+
+    # Step 2: call dev-status per issue
+    dev_base = f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
+    for key, issue_id in key_to_id.items():
+        try:
+            dr = requests.get(
+                dev_base,
+                auth=jira_auth(), headers=jira_headers(),
+                params={"issueId": issue_id, "applicationType": "github",
+                        "dataType": "pullrequest"},
+                timeout=10,
+            )
+            if dr.status_code != 200:
+                # Try without applicationType filter to catch GitLab / Bitbucket too
+                dr = requests.get(
+                    dev_base,
+                    auth=jira_auth(), headers=jira_headers(),
+                    params={"issueId": issue_id, "dataType": "pullrequest"},
+                    timeout=10,
+                )
+            if dr.status_code == 200:
+                prs = []
+                for detail in dr.json().get("detail", []):
+                    for pr in detail.get("pullRequests", []):
+                        state = pr.get("status", pr.get("state", "")).upper()
+                        prs.append({
+                            "title": pr.get("name") or pr.get("id") or "PR",
+                            "url": pr.get("url", ""),
+                            "state": state,
+                        })
+                if prs:
+                    pr_map[key] = prs
+        except Exception:
+            pass
+
+    return pr_map
 
 
 # ─── BUILD METRICS ────────────────────────────────────────
@@ -1350,6 +1456,18 @@ def render_all_history():
         st.info("No historical tickets found. Check your Jira connection.")
         return
 
+    # ── Fetch PR links for all tickets (batched, cached) ──
+    all_keys_tuple = tuple(t["key"] for t in all_tickets)
+    with st.spinner("Loading pull request data…"):
+        try:
+            pr_map = fetch_prs_for_issues(all_keys_tuple)
+        except Exception:
+            pr_map = {}
+    # Attach to tickets
+    for t in all_tickets:
+        if "pull_requests" not in t:
+            t["pull_requests"] = pr_map.get(t["key"], [])
+
     # ── Build filter option lists ──
 
     # Sprints — sorted newest first using sprint name
@@ -1600,6 +1718,35 @@ def render_all_history():
         sprint_label = t["sprints"][-1] if t.get("sprints") else "—"
         created_str = t.get("created_date", "")[:10] or "—"
 
+        # ── PR cell ──
+        prs = t.get("pull_requests", [])
+        if prs:
+            pr_links = ""
+            for pr in prs:
+                state = pr.get("state", "").upper()
+                if state in ("MERGED", "CLOSED", "DONE"):
+                    pr_color = "#818cf8"
+                    pr_icon  = "⛙"
+                elif state in ("OPEN", "IN_PROGRESS"):
+                    pr_color = "#10b981"
+                    pr_icon  = "⛙"
+                else:
+                    pr_color = "#64748b"
+                    pr_icon  = "⛙"
+                title_short = pr["title"][:22] + "…" if len(pr["title"]) > 22 else pr["title"]
+                pr_links += (
+                    f'<a href="{pr["url"]}" target="_blank" '
+                    f'title="{pr["title"]} [{state}]" '
+                    f'style="font-size:9px;color:{pr_color};text-decoration:none;'
+                    f'background:{pr_color}15;border:1px solid {pr_color}40;'
+                    f'border-radius:4px;padding:1px 5px;white-space:nowrap;'
+                    f'display:inline-block;margin-right:3px;">'
+                    f'{pr_icon} {title_short}</a>'
+                )
+            pr_cell = f'<div style="min-width:110px;flex-shrink:0;overflow:hidden;">{pr_links}</div>'
+        else:
+            pr_cell = '<div style="min-width:110px;flex-shrink:0;font-size:9px;color:#1e2d47;">—</div>'
+
         rows_html += f"""
         <div style="display:flex;align-items:center;gap:6px;padding:6px 0;
             border-bottom:1px solid rgba(0,212,255,0.04);font-size:12px;flex-wrap:nowrap;">
@@ -1618,6 +1765,7 @@ def render_all_history():
                          flex-shrink:0;min-width:80px;overflow:hidden;text-overflow:ellipsis;"
                   title="{sprint_label}">{sprint_label[:14]}…</span>
             {sp_badge}{fv_badge}
+            {pr_cell}
             <span style="font-size:9px;color:#334155;flex-shrink:0;">{created_str}</span>
         </div>
         """
@@ -1633,6 +1781,7 @@ def render_all_history():
             <span style="min-width:60px;">Assignee</span>
             <span style="min-width:80px;">Sprint</span>
             <span style="min-width:45px;">SP</span>
+            <span style="min-width:110px;">Pull Request</span>
             <span style="min-width:70px;">Created</span>
         </div>
         {rows_html}
