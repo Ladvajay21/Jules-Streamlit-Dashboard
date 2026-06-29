@@ -487,11 +487,12 @@ def fetch_all_sprints_tickets():
     except Exception:
         pass
 
-    # ── 2. Fetch ALL tickets that have ever been in any sprint ──
-    # Use two complementary JQL queries so we catch everything:
-    #   Pass A: ORDER BY key ASC  — catches old tickets like JENG-177
-    #   Pass B: ORDER BY created DESC — catches any the first pass may miss
-    # seen_keys deduplicates across both passes.
+    # ── 2. Fetch ALL project tickets using multiple complementary strategies ──
+    # Strategy A: sprint is not EMPTY, ORDER BY key ASC  (old tickets first)
+    # Strategy B: sprint is not EMPTY, ORDER BY created DESC (newest first)
+    # Strategy C: fixVersion is not EMPTY (catches tickets assigned to a release)
+    # Strategy D: ALL project tickets ORDER BY key ASC (brute-force catch-all)
+    # seen_keys deduplicates across all strategies.
     search_url = f"{JIRA_BASE}/rest/api/3/search/jql"
     all_tickets = []
     seen_keys = set()
@@ -537,13 +538,14 @@ def fetch_all_sprints_tickets():
             "carried_over": len(sprint_names) > 1,
         }
 
-    for order in ["key ASC", "created DESC"]:
+    def _run_jql_pass(jql):
+        """Paginate through a JQL query and add unseen tickets to all_tickets."""
         start_at = 0
         consecutive_errors = 0
         while True:
             try:
                 params = {
-                    "jql": f"project = {PROJECT} AND sprint is not EMPTY ORDER BY {order}",
+                    "jql": jql,
                     "maxResults": 100,
                     "startAt": start_at,
                     "fields": HISTORY_FIELDS,
@@ -553,7 +555,7 @@ def fetch_all_sprints_tickets():
                 resp.raise_for_status()
                 data = resp.json()
                 issues = data.get("issues", [])
-                consecutive_errors = 0  # reset on success
+                consecutive_errors = 0
 
                 for issue in issues:
                     key = issue["key"]
@@ -568,12 +570,63 @@ def fetch_all_sprints_tickets():
                     break
                 start_at += len(issues)
 
-            except Exception as exc:
+            except Exception:
                 consecutive_errors += 1
-                # Retry up to 3 times on transient errors, then move on
                 if consecutive_errors >= 3:
                     break
-                start_at += 100  # skip the problematic page and continue
+                start_at += 100  # skip bad page, keep going
+
+    # Strategy A — sprint-based, old-to-new (primary)
+    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY key ASC")
+    # Strategy B — sprint-based, new-to-old (catches any A missed)
+    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY created DESC")
+    # Strategy C — fix-version based (catches tickets like JENG-177 that have
+    #              a fixVersion but may not index cleanly under "sprint is not EMPTY")
+    _run_jql_pass(f"project = {PROJECT} AND fixVersion is not EMPTY ORDER BY key ASC")
+    # Strategy D — brute-force: every ticket in the project, oldest first.
+    #              This is the ultimate catch-all. We cap at 2000 tickets to stay
+    #              within Jira's maxResults limit but cover the full project history.
+    _run_jql_pass(f"project = {PROJECT} ORDER BY key ASC")
+
+    # Strategy E — fetch tickets directly from each sprint via the Agile board API.
+    #              This bypasses JQL indexing entirely — guaranteed to match what
+    #              Jira's own board UI shows, even for tickets that JQL misses.
+    if board_id and all_sprint_meta:
+        for sprint_meta in all_sprint_meta:
+            sprint_id = sprint_meta["id"]
+            sprint_start_at = 0
+            while True:
+                try:
+                    agile_url = f"{JIRA_BASE}/rest/agile/1.0/sprint/{sprint_id}/issue"
+                    agile_params = {
+                        "maxResults": 100,
+                        "startAt": sprint_start_at,
+                        "fields": HISTORY_FIELDS,
+                    }
+                    ar = requests.get(agile_url, auth=jira_auth(), headers=jira_headers(),
+                                      params=agile_params, timeout=30)
+                    ar.raise_for_status()
+                    adata = ar.json()
+                    a_issues = adata.get("issues", [])
+
+                    for issue in a_issues:
+                        key = issue["key"]
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        ticket = _parse_ticket(issue)
+                        # Ensure the sprint name from meta is recorded if parser missed it
+                        if sprint_meta["name"] and sprint_meta["name"] not in ticket["sprints"]:
+                            ticket["sprints"].append(sprint_meta["name"])
+                        ticket["carried_over"] = len(ticket["sprints"]) > 1
+                        all_tickets.append(ticket)
+
+                    fetched = sprint_start_at + len(a_issues)
+                    if fetched >= adata.get("total", 0) or not a_issues:
+                        break
+                    sprint_start_at += len(a_issues)
+                except Exception:
+                    break
 
     # ── 3. Batch-fetch PR links for all tickets via Jira dev-info API ──
     pr_map = {}  # key -> list of {"title": ..., "url": ..., "state": ...}
