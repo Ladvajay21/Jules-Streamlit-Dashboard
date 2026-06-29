@@ -1565,7 +1565,6 @@ def render_all_history():
             if found:
                 st.success(f"✅ Found in fetched data: sprints={found['sprints']} | fix_versions={found['fix_versions']} | created={found.get('created_date')}")
             else:
-                # Try fetching it directly from Jira
                 try:
                     dr = requests.get(
                         f"{JIRA_BASE}/rest/api/3/issue/{lookup_key.strip().upper()}",
@@ -1588,24 +1587,6 @@ def render_all_history():
                         st.warning(f"Ticket not found in Jira either (HTTP {dr.status_code})")
                 except Exception as ex:
                     st.warning(f"Error looking up ticket: {ex}")
-
-        # Show which tickets are currently being filtered OUT and why
-        if sel_sprint != "🏃 All Sprints":
-            sel_sprint_norm = sel_sprint.strip().lower()
-            dropped_by_sprint = [
-                t for t in all_tickets
-                if not any(sel_sprint_norm in s.strip().lower() for s in t.get("sprints", []))
-                and sel_fv in (["📦 All Fix Versions"] + [sel_fv]) and sel_fv in t.get("fix_versions", [sel_fv])
-            ]
-            # Simpler: just show all tickets that have the fixVersion but fail sprint match
-            if sel_fv != "📦 All Fix Versions":
-                fv_matches = [t for t in all_tickets if sel_fv in t.get("fix_versions", [])]
-                sprint_also_matches = [t for t in fv_matches if any(sel_sprint_norm in s.strip().lower() for s in t.get("sprints", []))]
-                sprint_dropped = [t for t in fv_matches if t not in sprint_also_matches]
-                if sprint_dropped:
-                    st.warning(f"⚠️ {len(sprint_dropped)} tickets have Fix Version '{sel_fv}' but are dropped by Sprint filter '{sel_sprint}':")
-                    for t in sprint_dropped[:20]:
-                        st.markdown(f"- `{t['key']}` sprints=`{t['sprints']}` created=`{t.get('created_date')}`")
 
     # ── Fetch PR links for all tickets (batched, cached) ──
     # fetch_prs_for_issues correctly resolves key → numeric ID before calling
