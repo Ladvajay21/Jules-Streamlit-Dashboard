@@ -1506,19 +1506,9 @@ def render_all_history():
         max_date = date.today()
 
     # ── Filter UI ──
-    # Initialise session-state defaults so clear buttons can reset them
-    if "hist_sprint" not in st.session_state:
-        st.session_state["hist_sprint"] = sprint_options[0]
-    if "hist_assignee" not in st.session_state:
-        st.session_state["hist_assignee"] = assignee_options[0]
-    if "hist_fv" not in st.session_state:
-        st.session_state["hist_fv"] = fv_options[0]
-    if "hist_status_group" not in st.session_state:
-        st.session_state["hist_status_group"] = "All Statuses"
-    if "hist_date_from" not in st.session_state:
-        st.session_state["hist_date_from"] = min_date
-    if "hist_date_to" not in st.session_state:
-        st.session_state["hist_date_to"] = max_date
+    # No pre-initialisation needed — widgets manage their own state.
+    # Clear buttons use .pop() to delete the key, which lets the widget
+    # re-initialise from its default on the next run (avoids StreamlitAPIException).
 
     st.markdown('<div class="dash-card" style="padding:14px 16px;margin-bottom:14px;">', unsafe_allow_html=True)
     st.markdown(
@@ -1534,8 +1524,8 @@ def render_all_history():
     with fx1:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_sprint", help="Clear sprint filter",
-                     disabled=(st.session_state["hist_sprint"] == sprint_options[0])):
-            st.session_state["hist_sprint"] = sprint_options[0]
+                     disabled=(sel_sprint == sprint_options[0])):
+            st.session_state.pop("hist_sprint", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     with fc2:
@@ -1543,8 +1533,8 @@ def render_all_history():
     with fx2:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_assignee", help="Clear assignee filter",
-                     disabled=(st.session_state["hist_assignee"] == assignee_options[0])):
-            st.session_state["hist_assignee"] = assignee_options[0]
+                     disabled=(sel_assignee == assignee_options[0])):
+            st.session_state.pop("hist_assignee", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     with fc3:
@@ -1552,8 +1542,8 @@ def render_all_history():
     with fx3:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_fv", help="Clear fix version filter",
-                     disabled=(st.session_state["hist_fv"] == fv_options[0])):
-            st.session_state["hist_fv"] = fv_options[0]
+                     disabled=(sel_fv == fv_options[0])):
+            st.session_state.pop("hist_fv", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1565,8 +1555,8 @@ def render_all_history():
     with fx4:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_date_from", help="Reset start date",
-                     disabled=(st.session_state["hist_date_from"] == min_date)):
-            st.session_state["hist_date_from"] = min_date
+                     disabled=(date_from == min_date)):
+            st.session_state.pop("hist_date_from", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     with fd2:
@@ -1575,8 +1565,8 @@ def render_all_history():
     with fx5:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_date_to", help="Reset end date",
-                     disabled=(st.session_state["hist_date_to"] == max_date)):
-            st.session_state["hist_date_to"] = max_date
+                     disabled=(date_to == max_date)):
+            st.session_state.pop("hist_date_to", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     with fd3:
@@ -1588,8 +1578,8 @@ def render_all_history():
     with fx6:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("✕", key="clr_status", help="Clear status filter",
-                     disabled=(st.session_state["hist_status_group"] == "All Statuses")):
-            st.session_state["hist_status_group"] = "All Statuses"
+                     disabled=(sel_status == "All Statuses")):
+            st.session_state.pop("hist_status_group", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1603,16 +1593,9 @@ def render_all_history():
     with fs2:
         st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
         if st.button("↺ Reset all", key="clr_all", help="Clear all filters"):
-            for k, v in [
-                ("hist_sprint",        sprint_options[0]),
-                ("hist_assignee",      assignee_options[0]),
-                ("hist_fv",            fv_options[0]),
-                ("hist_status_group",  "All Statuses"),
-                ("hist_date_from",     min_date),
-                ("hist_date_to",       max_date),
-                ("hist_search",        ""),
-            ]:
-                st.session_state[k] = v
+            for k in ["hist_sprint", "hist_assignee", "hist_fv",
+                      "hist_status_group", "hist_date_from", "hist_date_to", "hist_search"]:
+                st.session_state.pop(k, None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
