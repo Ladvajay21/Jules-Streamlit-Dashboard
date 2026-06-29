@@ -655,16 +655,18 @@ def fetch_all_sprints_tickets():
     return all_tickets, all_sprint_meta
 
 
-# ─── FETCH PRs FOR ALL ISSUES (numeric ID resolution) ────
+# ─── FETCH PRs FOR A FILTERED SET OF ISSUES ─────────────
 @st.cache_data(ttl=600)
 def fetch_prs_for_issues(issue_keys_tuple):
     """
-    Fetch PR links for a tuple of issue keys using Jira's dev-status API.
+    Fetch PR links for a small tuple of issue keys (the filtered/visible set only).
     Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
 
-    The dev-status endpoint REQUIRES the numeric Jira issue ID (not the key).
-    We resolve key → numeric ID by hitting /rest/api/3/issue/{key}?fields=id
-    which is the most reliable approach.
+    Steps:
+      1. Resolve keys → numeric Jira IDs via one batched JQL search call.
+      2. Call dev-status once per issue (no applicationType = returns all providers).
+    Designed to be fast — caller should pass only the currently visible tickets,
+    not the full 500+ ticket set.
     """
     if not issue_keys_tuple:
         return {}
@@ -672,9 +674,10 @@ def fetch_prs_for_issues(issue_keys_tuple):
     pr_map = {}
     dev_base = f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
 
-    # Resolve keys → numeric IDs in batches via search API
+    # ── Step 1: resolve keys → numeric IDs in one batch call ──
     key_to_id = {}
     keys_list = list(issue_keys_tuple)
+    # Split into batches of 50 to stay within URL length limits
     for batch_start in range(0, len(keys_list), 50):
         batch = keys_list[batch_start: batch_start + 50]
         jql = "issueKey in (" + ",".join(batch) + ")"
@@ -685,50 +688,35 @@ def fetch_prs_for_issues(issue_keys_tuple):
                 params={"jql": jql, "maxResults": 50, "fields": "id"},
                 timeout=20,
             )
-            r.raise_for_status()
-            for iss in r.json().get("issues", []):
-                # iss["id"] is the numeric string e.g. "123456"
-                key_to_id[iss["key"]] = iss["id"]
+            if r.status_code == 200:
+                for iss in r.json().get("issues", []):
+                    key_to_id[iss["key"]] = iss["id"]
         except Exception:
-            # Fallback: resolve individually for this batch
-            for key in batch:
-                try:
-                    ir = requests.get(
-                        f"{JIRA_BASE}/rest/api/3/issue/{key}",
-                        auth=jira_auth(), headers=jira_headers(),
-                        params={"fields": "id"}, timeout=10,
-                    )
-                    if ir.status_code == 200:
-                        key_to_id[key] = ir.json()["id"]
-                except Exception:
-                    pass
+            pass
 
-    # Call dev-status per issue using numeric ID
+    # ── Step 2: one dev-status call per issue, no applicationType filter ──
     for key, issue_id in key_to_id.items():
-        prs = []
-        for app_type in [None, "github", "gitlab", "bitbucket"]:
-            try:
-                params = {"issueId": issue_id, "dataType": "pullrequest"}
-                if app_type:
-                    params["applicationType"] = app_type
-                dr = requests.get(
-                    dev_base, auth=jira_auth(), headers=jira_headers(),
-                    params=params, timeout=10,
-                )
-                if dr.status_code == 200:
-                    for detail in dr.json().get("detail", []):
-                        for pr in detail.get("pullRequests", []):
-                            state = pr.get("status", pr.get("state", "")).upper()
-                            url = pr.get("url", "")
-                            title = pr.get("name") or pr.get("id") or "PR"
-                            if url and not any(p["url"] == url for p in prs):
-                                prs.append({"title": title, "url": url, "state": state})
-                    if prs:
-                        break  # found PRs, no need to try other app types
-            except Exception:
-                pass
-        if prs:
-            pr_map[key] = prs
+        try:
+            dr = requests.get(
+                dev_base, auth=jira_auth(), headers=jira_headers(),
+                params={"issueId": issue_id, "dataType": "pullrequest"},
+                timeout=8,
+            )
+            if dr.status_code == 200:
+                prs = []
+                for detail in dr.json().get("detail", []):
+                    for pr in detail.get("pullRequests", []):
+                        url = pr.get("url", "")
+                        if url and not any(p["url"] == url for p in prs):
+                            prs.append({
+                                "title": pr.get("name") or pr.get("id") or "PR",
+                                "url": url,
+                                "state": pr.get("status", pr.get("state", "")).upper(),
+                            })
+                if prs:
+                    pr_map[key] = prs
+        except Exception:
+            pass
 
     return pr_map
 
@@ -1588,19 +1576,6 @@ def render_all_history():
                 except Exception as ex:
                     st.warning(f"Error looking up ticket: {ex}")
 
-    # ── Fetch PR links for all tickets (batched, cached) ──
-    # fetch_prs_for_issues correctly resolves key → numeric ID before calling
-    # the dev-status API, so PRs are actually returned.
-    all_keys_tuple = tuple(t["key"] for t in all_tickets)
-    with st.spinner("Loading pull request data…"):
-        try:
-            pr_map = fetch_prs_for_issues(all_keys_tuple)
-        except Exception:
-            pr_map = {}
-    # Always overwrite pull_requests — never skip, never trust stale cached []
-    for t in all_tickets:
-        t["pull_requests"] = pr_map.get(t["key"], [])
-
     # ── Build filter option lists ──
 
     # Sprints — sorted newest first using sprint name
@@ -1784,6 +1759,19 @@ def render_all_history():
             t for t in filtered
             if q in t["key"].lower() or q in t["summary"].lower()
         ]
+
+    # ── Fetch PRs — only for the filtered/visible set ──────────────────────────
+    # Filtered set is typically <100 tickets, making this fast (not 500+ calls).
+    # Cached by key-tuple so changing filters reuses previously fetched results.
+    filtered_keys_tuple = tuple(t["key"] for t in filtered)
+    if filtered_keys_tuple:
+        with st.spinner("Loading pull request data…"):
+            try:
+                pr_map = fetch_prs_for_issues(filtered_keys_tuple)
+            except Exception:
+                pr_map = {}
+        for t in filtered:
+            t["pull_requests"] = pr_map.get(t["key"], [])
 
     # ── Summary KPIs ──
     total_h = len(filtered)
@@ -2126,3 +2114,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
