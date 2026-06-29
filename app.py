@@ -661,23 +661,16 @@ def fetch_prs_for_issues(issue_keys_tuple):
     """
     Fetch PR links for a small tuple of issue keys (the filtered/visible set only).
     Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
-
-    Steps:
-      1. Resolve keys → numeric Jira IDs via one batched JQL search call.
-      2. Call dev-status once per issue (no applicationType = returns all providers).
-    Designed to be fast — caller should pass only the currently visible tickets,
-    not the full 500+ ticket set.
+    Tries multiple endpoint variants to handle different Jira Cloud configurations.
     """
     if not issue_keys_tuple:
         return {}
 
     pr_map = {}
-    dev_base = f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
 
-    # ── Step 1: resolve keys → numeric IDs in one batch call ──
+    # ── Step 1: resolve keys → numeric IDs via batched JQL ──
     key_to_id = {}
     keys_list = list(issue_keys_tuple)
-    # Split into batches of 50 to stay within URL length limits
     for batch_start in range(0, len(keys_list), 50):
         batch = keys_list[batch_start: batch_start + 50]
         jql = "issueKey in (" + ",".join(batch) + ")"
@@ -694,29 +687,58 @@ def fetch_prs_for_issues(issue_keys_tuple):
         except Exception:
             pass
 
-    # ── Step 2: one dev-status call per issue, no applicationType filter ──
+    if not key_to_id:
+        return {}
+
+    # ── Step 2: try every known endpoint variant per issue ──
+    # Jira Cloud exposes dev-status under different paths depending on
+    # the instance setup. We try all variants and use the first that works.
+    def _dev_status_endpoints(issue_id):
+        return [
+            # Standard Jira Cloud dev-status
+            f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
+            f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
+            # Atlassian API gateway (uses cloud ID)
+            f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
+            f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/1.0/issue/detail",
+        ]
+
+    def _extract_prs(response_json):
+        prs = []
+        for detail in response_json.get("detail", []):
+            for pr in detail.get("pullRequests", []):
+                url = pr.get("url", "")
+                if url and not any(p["url"] == url for p in prs):
+                    prs.append({
+                        "title": pr.get("name") or pr.get("id") or "PR",
+                        "url": url,
+                        "state": pr.get("status", pr.get("state", "")).upper(),
+                    })
+        return prs
+
     for key, issue_id in key_to_id.items():
-        try:
-            dr = requests.get(
-                dev_base, auth=jira_auth(), headers=jira_headers(),
-                params={"issueId": issue_id, "dataType": "pullrequest"},
-                timeout=8,
-            )
-            if dr.status_code == 200:
-                prs = []
-                for detail in dr.json().get("detail", []):
-                    for pr in detail.get("pullRequests", []):
-                        url = pr.get("url", "")
-                        if url and not any(p["url"] == url for p in prs):
-                            prs.append({
-                                "title": pr.get("name") or pr.get("id") or "PR",
-                                "url": url,
-                                "state": pr.get("status", pr.get("state", "")).upper(),
-                            })
-                if prs:
-                    pr_map[key] = prs
-        except Exception:
-            pass
+        prs = []
+        for endpoint in _dev_status_endpoints(issue_id):
+            if prs:
+                break
+            # Try without applicationType (returns all providers at once)
+            for params in [
+                {"issueId": issue_id, "dataType": "pullrequest"},
+                {"issueId": issue_id},  # no filter at all
+            ]:
+                try:
+                    dr = requests.get(
+                        endpoint, auth=jira_auth(), headers=jira_headers(),
+                        params=params, timeout=8,
+                    )
+                    if dr.status_code == 200:
+                        prs = _extract_prs(dr.json())
+                        if prs:
+                            break
+                except Exception:
+                    pass
+        if prs:
+            pr_map[key] = prs
 
     return pr_map
 
@@ -1581,7 +1603,6 @@ def render_all_history():
             st.markdown("---")
             st.markdown(f"**🔗 PR diagnostic for `{key_upper}`**")
             try:
-                # Step 1: get numeric ID
                 id_resp = requests.get(
                     f"{JIRA_BASE}/rest/api/3/issue/{key_upper}",
                     headers=jira_headers(), auth=jira_auth(),
@@ -1590,25 +1611,27 @@ def render_all_history():
                 if id_resp.status_code == 200:
                     numeric_id = id_resp.json().get("id")
                     st.markdown(f"Numeric ID: `{numeric_id}`")
-
-                    # Step 2: call dev-status with numeric ID
-                    for endpoint in [
+                    endpoints = [
                         f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
                         f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
-                    ]:
+                        f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
+                        f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/1.0/issue/detail",
+                    ]
+                    for ep in endpoints:
                         for params in [
                             {"issueId": numeric_id, "dataType": "pullrequest"},
-                            {"issueId": numeric_id, "applicationType": "github", "dataType": "pullrequest"},
                             {"issueId": numeric_id},
                         ]:
                             try:
                                 pr_resp = requests.get(
-                                    endpoint, headers=jira_headers(), auth=jira_auth(),
+                                    ep, headers=jira_headers(), auth=jira_auth(),
                                     params=params, timeout=10,
                                 )
-                                st.markdown(f"`{endpoint}` params=`{params}` → HTTP `{pr_resp.status_code}`")
+                                label = ep.split("/rest/")[1]
+                                st.markdown(f"`{label}` `{params}` → HTTP `{pr_resp.status_code}`")
                                 if pr_resp.status_code == 200:
                                     st.json(pr_resp.json())
+                                    break
                             except Exception as pe:
                                 st.markdown(f"Error: {pe}")
                 else:
