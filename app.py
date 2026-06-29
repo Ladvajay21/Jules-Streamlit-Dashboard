@@ -1506,6 +1506,20 @@ def render_all_history():
         max_date = date.today()
 
     # ── Filter UI ──
+    # Initialise session-state defaults so clear buttons can reset them
+    if "hist_sprint" not in st.session_state:
+        st.session_state["hist_sprint"] = sprint_options[0]
+    if "hist_assignee" not in st.session_state:
+        st.session_state["hist_assignee"] = assignee_options[0]
+    if "hist_fv" not in st.session_state:
+        st.session_state["hist_fv"] = fv_options[0]
+    if "hist_status_group" not in st.session_state:
+        st.session_state["hist_status_group"] = "All Statuses"
+    if "hist_date_from" not in st.session_state:
+        st.session_state["hist_date_from"] = min_date
+    if "hist_date_to" not in st.session_state:
+        st.session_state["hist_date_to"] = max_date
+
     st.markdown('<div class="dash-card" style="padding:14px 16px;margin-bottom:14px;">', unsafe_allow_html=True)
     st.markdown(
         '<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;'
@@ -1513,33 +1527,94 @@ def render_all_history():
         unsafe_allow_html=True,
     )
 
-    fc1, fc2, fc3 = st.columns(3)
+    # ── Row 1: Sprint | Assignee | Fix Version — each with a ✕ clear button ──
+    fc1, fx1, fc2, fx2, fc3, fx3 = st.columns([5, 1, 5, 1, 5, 1])
     with fc1:
         sel_sprint = st.selectbox("Sprint", sprint_options, key="hist_sprint")
+    with fx1:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_sprint", help="Clear sprint filter",
+                     disabled=(st.session_state["hist_sprint"] == sprint_options[0])):
+            st.session_state["hist_sprint"] = sprint_options[0]
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     with fc2:
         sel_assignee = st.selectbox("Assignee / Company", assignee_options, key="hist_assignee")
+    with fx2:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_assignee", help="Clear assignee filter",
+                     disabled=(st.session_state["hist_assignee"] == assignee_options[0])):
+            st.session_state["hist_assignee"] = assignee_options[0]
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     with fc3:
         sel_fv = st.selectbox("Fix Version", fv_options, key="hist_fv")
+    with fx3:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_fv", help="Clear fix version filter",
+                     disabled=(st.session_state["hist_fv"] == fv_options[0])):
+            st.session_state["hist_fv"] = fv_options[0]
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    fd1, fd2, fd3 = st.columns([2, 2, 1])
+    # ── Row 2: Date From | Date To | Status Group — each with a ✕ clear button ──
+    fd1, fx4, fd2, fx5, fd3, fx6 = st.columns([5, 1, 5, 1, 4, 1])
     with fd1:
         date_from = st.date_input("Created From", value=min_date, min_value=min_date,
                                    max_value=max_date, key="hist_date_from")
+    with fx4:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_date_from", help="Reset start date",
+                     disabled=(st.session_state["hist_date_from"] == min_date)):
+            st.session_state["hist_date_from"] = min_date
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     with fd2:
         date_to = st.date_input("Created To", value=max_date, min_value=min_date,
                                  max_value=max_date, key="hist_date_to")
+    with fx5:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_date_to", help="Reset end date",
+                     disabled=(st.session_state["hist_date_to"] == max_date)):
+            st.session_state["hist_date_to"] = max_date
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     with fd3:
         sel_status = st.selectbox(
             "Status Group",
             ["All Statuses", "✅ Done", "⚡ Active", "🚫 Blocked", "📋 To Do"],
             key="hist_status_group",
         )
+    with fx6:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("✕", key="clr_status", help="Clear status filter",
+                     disabled=(st.session_state["hist_status_group"] == "All Statuses")):
+            st.session_state["hist_status_group"] = "All Statuses"
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Optional free-text search
-    search_text = st.text_input(
-        "🔎 Search ticket key or summary", placeholder="e.g. JENG-123 or login bug",
-        key="hist_search", label_visibility="visible"
-    )
+    # ── Search + Reset All row ──
+    fs1, fs2 = st.columns([5, 1])
+    with fs1:
+        search_text = st.text_input(
+            "🔎 Search ticket key or summary", placeholder="e.g. JENG-123 or login bug",
+            key="hist_search", label_visibility="visible"
+        )
+    with fs2:
+        st.markdown("<div style='padding-top:24px;'>", unsafe_allow_html=True)
+        if st.button("↺ Reset all", key="clr_all", help="Clear all filters"):
+            for k, v in [
+                ("hist_sprint",        sprint_options[0]),
+                ("hist_assignee",      assignee_options[0]),
+                ("hist_fv",            fv_options[0]),
+                ("hist_status_group",  "All Statuses"),
+                ("hist_date_from",     min_date),
+                ("hist_date_to",       max_date),
+                ("hist_search",        ""),
+            ]:
+                st.session_state[k] = v
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
