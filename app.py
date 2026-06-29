@@ -1549,13 +1549,14 @@ def render_all_history():
         # Let user directly look up a specific ticket key
         lookup_key = st.text_input("Look up a specific ticket key (e.g. JENG-177):", key="debug_lookup")
         if lookup_key.strip():
-            found = next((t for t in all_tickets if t["key"].upper() == lookup_key.strip().upper()), None)
+            key_upper = lookup_key.strip().upper()
+            found = next((t for t in all_tickets if t["key"].upper() == key_upper), None)
             if found:
                 st.success(f"✅ Found in fetched data: sprints={found['sprints']} | fix_versions={found['fix_versions']} | created={found.get('created_date')}")
             else:
                 try:
                     dr = requests.get(
-                        f"{JIRA_BASE}/rest/api/3/issue/{lookup_key.strip().upper()}",
+                        f"{JIRA_BASE}/rest/api/3/issue/{key_upper}",
                         headers=jira_headers(), auth=jira_auth(),
                         params={"fields": "summary,status,customfield_10020,fixVersions"},
                         timeout=10,
@@ -1575,6 +1576,45 @@ def render_all_history():
                         st.warning(f"Ticket not found in Jira either (HTTP {dr.status_code})")
                 except Exception as ex:
                     st.warning(f"Error looking up ticket: {ex}")
+
+            # ── PR diagnostic for this ticket ──
+            st.markdown("---")
+            st.markdown(f"**🔗 PR diagnostic for `{key_upper}`**")
+            try:
+                # Step 1: get numeric ID
+                id_resp = requests.get(
+                    f"{JIRA_BASE}/rest/api/3/issue/{key_upper}",
+                    headers=jira_headers(), auth=jira_auth(),
+                    params={"fields": "id"}, timeout=10,
+                )
+                if id_resp.status_code == 200:
+                    numeric_id = id_resp.json().get("id")
+                    st.markdown(f"Numeric ID: `{numeric_id}`")
+
+                    # Step 2: call dev-status with numeric ID
+                    for endpoint in [
+                        f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
+                        f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
+                    ]:
+                        for params in [
+                            {"issueId": numeric_id, "dataType": "pullrequest"},
+                            {"issueId": numeric_id, "applicationType": "github", "dataType": "pullrequest"},
+                            {"issueId": numeric_id},
+                        ]:
+                            try:
+                                pr_resp = requests.get(
+                                    endpoint, headers=jira_headers(), auth=jira_auth(),
+                                    params=params, timeout=10,
+                                )
+                                st.markdown(f"`{endpoint}` params=`{params}` → HTTP `{pr_resp.status_code}`")
+                                if pr_resp.status_code == 200:
+                                    st.json(pr_resp.json())
+                            except Exception as pe:
+                                st.markdown(f"Error: {pe}")
+                else:
+                    st.warning(f"Could not get numeric ID: HTTP {id_resp.status_code}")
+            except Exception as de:
+                st.warning(f"PR diagnostic error: {de}")
 
     # ── Build filter option lists ──
 
@@ -2114,4 +2154,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
