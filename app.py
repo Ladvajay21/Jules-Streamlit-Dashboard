@@ -443,6 +443,146 @@ def fetch_go_live_blocker_tickets():
     return all_tickets
 
 
+# ─── FETCH ALL SPRINTS HISTORY (NEW) ──────────────────────
+@st.cache_data(ttl=600)
+def fetch_all_sprints_tickets():
+    """
+    Fetch ALL tickets across ALL sprints (active + closed) for the history tab.
+    Also pulls reporter / company (organisation) custom field where available.
+    Returns (tickets_list, sprints_list).
+    """
+    # ── 1. Get board & all sprints ──
+    board_id = None
+    all_sprint_meta = []
+    try:
+        url = f"{JIRA_BASE}/rest/agile/1.0/board"
+        resp = requests.get(url, auth=jira_auth(), headers=jira_headers(),
+                            params={"projectKeyOrId": PROJECT, "maxResults": 10}, timeout=15)
+        resp.raise_for_status()
+        boards = resp.json().get("values", [])
+        if boards:
+            board_id = boards[0]["id"]
+
+        if board_id:
+            s_url = f"{JIRA_BASE}/rest/agile/1.0/board/{board_id}/sprint"
+            s_start = 0
+            while True:
+                sr = requests.get(s_url, auth=jira_auth(), headers=jira_headers(),
+                                  params={"state": "active,closed,future", "maxResults": 50,
+                                          "startAt": s_start}, timeout=15)
+                sr.raise_for_status()
+                s_data = sr.json()
+                for s in s_data.get("values", []):
+                    all_sprint_meta.append({
+                        "id": s["id"],
+                        "name": s.get("name", "Unknown"),
+                        "state": s.get("state", "unknown"),
+                        "startDate": s.get("startDate", ""),
+                        "endDate": s.get("endDate", ""),
+                    })
+                if s_start + len(s_data.get("values", [])) >= s_data.get("total", 0):
+                    break
+                s_start += len(s_data.get("values", []))
+    except Exception:
+        pass
+
+    # ── 2. Fetch all tickets from all sprints via JQL ──
+    url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    all_tickets = []
+    seen_keys = set()
+    start_at = 0
+
+    while True:
+        try:
+            params = {
+                "jql": f"project = {PROJECT} AND sprint is not EMPTY ORDER BY created DESC",
+                "maxResults": 100,
+                "startAt": start_at,
+                "fields": (
+                    "summary,status,assignee,reporter,customfield_10024,"
+                    "issuetype,fixVersions,customfield_10020,resolutiondate,"
+                    "created,priority,labels,customfield_10010"
+                ),
+            }
+            resp = requests.get(url, headers=jira_headers(), auth=jira_auth(),
+                                params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            issues = data.get("issues", [])
+
+            for issue in issues:
+                key = issue["key"]
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                f = issue.get("fields", {})
+
+                # Sprint names
+                sprint_names = []
+                sprints_raw = f.get("customfield_10020") or []
+                if isinstance(sprints_raw, list):
+                    for sp in sprints_raw:
+                        if isinstance(sp, dict):
+                            sprint_names.append(sp.get("name", ""))
+                        elif isinstance(sp, str):
+                            m = re.search(r'name=([^,\]]+)', sp)
+                            if m:
+                                sprint_names.append(m.group(1))
+
+                # Fix versions
+                fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
+
+                # Reporter (used as proxy for "company" context if org field absent)
+                reporter = (f.get("reporter") or {}).get("displayName", "Unknown")
+
+                # Created date
+                created_raw = f.get("created", "")
+                created_date = ""
+                if created_raw:
+                    try:
+                        created_date = datetime.fromisoformat(
+                            created_raw.replace("Z", "+00:00")
+                        ).date().isoformat()
+                    except Exception:
+                        created_date = created_raw[:10]
+
+                # Resolution date
+                res_raw = f.get("resolutiondate", "")
+                resolution_date = ""
+                if res_raw:
+                    try:
+                        resolution_date = datetime.fromisoformat(
+                            res_raw.replace("Z", "+00:00")
+                        ).date().isoformat()
+                    except Exception:
+                        resolution_date = res_raw[:10]
+
+                all_tickets.append({
+                    "key": key,
+                    "summary": clean_title(f.get("summary", "")),
+                    "status": f.get("status", {}).get("name", "Unknown"),
+                    "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                    "reporter": reporter,
+                    "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
+                    "type": f.get("issuetype", {}).get("name", "Task"),
+                    "sprints": sprint_names,
+                    "fix_versions": fix_versions,
+                    "labels": f.get("labels") or [],
+                    "priority": (f.get("priority") or {}).get("name", ""),
+                    "created_date": created_date,
+                    "resolution_date": resolution_date,
+                    "carried_over": len(sprint_names) > 1,
+                })
+
+            if start_at + len(issues) >= data.get("total", 0):
+                break
+            start_at += len(issues)
+        except Exception:
+            break
+
+    return all_tickets, all_sprint_meta
+
+
 # ─── BUILD METRICS ────────────────────────────────────────
 def build_metrics(tickets, sprint_start=None, sprint_days=48):
     today = date.today()
@@ -1178,6 +1318,335 @@ def post_daily_slack(m, tickets, sprint_name, sprint_days):
         return False, str(e)
 
 
+# ─── ALL HISTORY TAB (NEW) ────────────────────────────────
+def render_all_history():
+    """
+    New tab: browse every ticket across ALL sprints with filters for
+    Sprint, Assignee (company-proxy), Fix Version, and Created Date range.
+    Includes summary KPIs and a paginated ticket table.
+    """
+    st.html("""
+    <div style="background:linear-gradient(135deg,rgba(0,212,255,0.07),rgba(129,140,248,0.07));
+        border:1px solid rgba(0,212,255,0.12);border-radius:14px;padding:16px 20px;margin-bottom:16px;">
+        <div style="font-size:10px;color:#00d4ff;text-transform:uppercase;letter-spacing:2px;font-weight:600;margin-bottom:4px;">
+            📜 ALL SPRINTS HISTORY
+        </div>
+        <div style="font-size:18px;font-weight:900;color:#e2e8f0;">Complete Ticket Archive</div>
+        <div style="font-size:12px;color:#475569;margin-top:3px;">
+            Browse every ticket across all sprints · Filter by sprint, assignee, fix version, or date
+        </div>
+    </div>
+    """)
+
+    # ── Load data ──
+    with st.spinner("Loading full ticket history…"):
+        try:
+            all_tickets, all_sprint_meta = fetch_all_sprints_tickets()
+        except Exception as e:
+            st.error(f"Failed to load history: {e}")
+            return
+
+    if not all_tickets:
+        st.info("No historical tickets found. Check your Jira connection.")
+        return
+
+    # ── Build filter option lists ──
+
+    # Sprints — sorted newest first using sprint name
+    sprint_names_sorted = []
+    seen_sprint_names = set()
+    # Use sprint meta for ordering if available
+    if all_sprint_meta:
+        for sm in reversed(all_sprint_meta):  # reversed = newest first
+            n = sm["name"]
+            if n and n not in seen_sprint_names:
+                sprint_names_sorted.append(n)
+                seen_sprint_names.add(n)
+    # Add any sprint names found in tickets but not in meta
+    for t in all_tickets:
+        for sn in t.get("sprints", []):
+            if sn and sn not in seen_sprint_names:
+                sprint_names_sorted.append(sn)
+                seen_sprint_names.add(sn)
+
+    sprint_options = ["🏃 All Sprints"] + sprint_names_sorted
+
+    # Assignees (used as "company / person" filter)
+    assignee_set = sorted({t["assignee"] for t in all_tickets if t["assignee"]})
+    assignee_options = ["👤 All Assignees"] + assignee_set
+
+    # Fix versions
+    fv_set = set()
+    for t in all_tickets:
+        for fv in t.get("fix_versions", []):
+            if fv:
+                fv_set.add(fv)
+    fv_options = ["📦 All Fix Versions"] + sorted(fv_set)
+
+    # Date range bounds
+    all_dates = [t["created_date"] for t in all_tickets if t.get("created_date")]
+    if all_dates:
+        min_date = date.fromisoformat(min(all_dates))
+        max_date = date.fromisoformat(max(all_dates))
+    else:
+        min_date = date.today() - timedelta(days=180)
+        max_date = date.today()
+
+    # ── Filter UI ──
+    st.markdown('<div class="dash-card" style="padding:14px 16px;margin-bottom:14px;">', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;'
+        'color:#475569;margin-bottom:10px;">🔍 Filters</div>',
+        unsafe_allow_html=True,
+    )
+
+    fc1, fc2, fc3 = st.columns(3)
+    with fc1:
+        sel_sprint = st.selectbox("Sprint", sprint_options, key="hist_sprint")
+    with fc2:
+        sel_assignee = st.selectbox("Assignee / Company", assignee_options, key="hist_assignee")
+    with fc3:
+        sel_fv = st.selectbox("Fix Version", fv_options, key="hist_fv")
+
+    fd1, fd2, fd3 = st.columns([2, 2, 1])
+    with fd1:
+        date_from = st.date_input("Created From", value=min_date, min_value=min_date,
+                                   max_value=max_date, key="hist_date_from")
+    with fd2:
+        date_to = st.date_input("Created To", value=max_date, min_value=min_date,
+                                 max_value=max_date, key="hist_date_to")
+    with fd3:
+        sel_status = st.selectbox(
+            "Status Group",
+            ["All Statuses", "✅ Done", "⚡ Active", "🚫 Blocked", "📋 To Do"],
+            key="hist_status_group",
+        )
+
+    # Optional free-text search
+    search_text = st.text_input(
+        "🔎 Search ticket key or summary", placeholder="e.g. JENG-123 or login bug",
+        key="hist_search", label_visibility="visible"
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Apply filters ──
+    filtered = list(all_tickets)
+
+    if sel_sprint != "🏃 All Sprints":
+        filtered = [t for t in filtered if sel_sprint in t.get("sprints", [])]
+
+    if sel_assignee != "👤 All Assignees":
+        filtered = [t for t in filtered if t["assignee"] == sel_assignee]
+
+    if sel_fv != "📦 All Fix Versions":
+        filtered = [t for t in filtered if sel_fv in t.get("fix_versions", [])]
+
+    if sel_status != "All Statuses":
+        if sel_status == "✅ Done":
+            filtered = [t for t in filtered if t["status"] in DONE_STATUSES]
+        elif sel_status == "⚡ Active":
+            filtered = [t for t in filtered if t["status"] in ACTIVE_STATUSES]
+        elif sel_status == "🚫 Blocked":
+            filtered = [t for t in filtered if t["status"] in BLOCKED_STATUSES]
+        elif sel_status == "📋 To Do":
+            filtered = [t for t in filtered if t["status"] == "To Do"]
+
+    # Date filter on created_date
+    filtered = [
+        t for t in filtered
+        if t.get("created_date") and
+           date_from <= date.fromisoformat(t["created_date"]) <= date_to
+    ]
+
+    # Text search
+    if search_text.strip():
+        q = search_text.strip().lower()
+        filtered = [
+            t for t in filtered
+            if q in t["key"].lower() or q in t["summary"].lower()
+        ]
+
+    # ── Summary KPIs ──
+    total_h = len(filtered)
+    done_h = sum(1 for t in filtered if t["status"] in DONE_STATUSES)
+    blocked_h = sum(1 for t in filtered if t["status"] in BLOCKED_STATUSES)
+    total_sp_h = sum(t["sp"] or 0 for t in filtered)
+    done_sp_h = sum(t["sp"] or 0 for t in filtered if t["status"] in DONE_STATUSES)
+    carried_h = sum(1 for t in filtered if t.get("carried_over"))
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    with k1: kpi_card("🎫", "Tickets", total_h, "#00d4ff")
+    with k2: kpi_card("✅", "Done", done_h, "#10b981", f"{round(done_h/total_h*100) if total_h else 0}%")
+    with k3: kpi_card("🚫", "Blocked", blocked_h, "#f87171")
+    with k4: kpi_card("💎", "Total SP", total_sp_h, "#fb923c")
+    with k5: kpi_card("✨", "Done SP", done_sp_h, "#34d399")
+    with k6: kpi_card("↩", "Carried Over", carried_h, "#fbbf24")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if total_h == 0:
+        st.info("No tickets match the selected filters.")
+        return
+
+    # ── Sprint breakdown chart ──
+    st.markdown('<div class="dash-card">', unsafe_allow_html=True)
+    st.markdown("**📊 Tickets per Sprint** — filtered view")
+
+    sprint_counts: dict = {}
+    sprint_done: dict = {}
+    for t in filtered:
+        for sn in (t.get("sprints") or []):
+            sprint_counts[sn] = sprint_counts.get(sn, 0) + 1
+            if t["status"] in DONE_STATUSES:
+                sprint_done[sn] = sprint_done.get(sn, 0) + 1
+
+    # Order by sprint_names_sorted list
+    chart_sprints = [sn for sn in sprint_names_sorted if sn in sprint_counts]
+    # Add any not in meta
+    for sn in sprint_counts:
+        if sn not in chart_sprints:
+            chart_sprints.append(sn)
+
+    if chart_sprints:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(
+            name="Total", x=chart_sprints,
+            y=[sprint_counts.get(s, 0) for s in chart_sprints],
+            marker_color="#1e3a5f",
+            hovertemplate="<b>%{x}</b><br>Total: %{y}<extra></extra>",
+        ))
+        fig2.add_trace(go.Bar(
+            name="Done", x=chart_sprints,
+            y=[sprint_done.get(s, 0) for s in chart_sprints],
+            marker_color="#10b981",
+            hovertemplate="<b>%{x}</b><br>Done: %{y}<extra></extra>",
+        ))
+        fig2.update_layout(
+            barmode="overlay", height=240,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="DM Sans", color="#64748b"),
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#94a3b8"),
+                        orientation="h", y=-0.2),
+            xaxis=dict(gridcolor="#1e2d47", tickangle=-30, tickfont=dict(size=10)),
+            yaxis=dict(gridcolor="#1e2d47"),
+            margin=dict(l=0, r=0, t=10, b=50),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Ticket table — all tickets, no pagination ──
+    st.markdown(
+        f'<div style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;'
+        f'color:#475569;margin:16px 0 10px;">🎫 {total_h} TICKETS</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Sort options
+    sort_by = st.selectbox(
+        "Sort by",
+        ["Key (newest)", "Key (oldest)", "Status", "Assignee", "Story Points ↓", "Created ↓"],
+        key="hist_sort", label_visibility="collapsed",
+    )
+
+    # Apply sort
+    def sort_key(t):
+        if sort_by == "Key (newest)":
+            try:
+                return -int(t["key"].split("-")[1])
+            except Exception:
+                return 0
+        elif sort_by == "Key (oldest)":
+            try:
+                return int(t["key"].split("-")[1])
+            except Exception:
+                return 0
+        elif sort_by == "Status":
+            idx = STATUS_ORDER.index(t["status"]) if t["status"] in STATUS_ORDER else 99
+            return idx
+        elif sort_by == "Assignee":
+            return t["assignee"]
+        elif sort_by == "Story Points ↓":
+            return -(t["sp"] or 0)
+        elif sort_by == "Created ↓":
+            return t.get("created_date", "") or ""
+        return t["key"]
+
+    sorted_tickets = sorted(filtered, key=sort_key)
+
+    # Render ticket rows
+    rows_html = ""
+    for t in sorted_tickets:
+        status_color = STATUS_COLORS.get(t["status"], "#64748b")
+        dev_color = get_dev_color(t["assignee"])
+        sp_badge = (
+            f'<span style="font-size:9px;background:rgba(251,146,60,0.12);color:#fb923c;'
+            f'border-radius:3px;padding:1px 5px;">{t["sp"]} SP</span>'
+            if t["sp"] else
+            '<span style="font-size:9px;color:#334155;">— SP</span>'
+        )
+        carried_badge = (
+            '<span style="font-size:9px;background:rgba(251,191,36,0.1);border:1px solid '
+            'rgba(251,191,36,0.3);color:#fbbf24;border-radius:3px;padding:1px 5px;">↩</span> '
+            if t.get("carried_over") else ""
+        )
+        fv_badge = ""
+        if t.get("fix_versions"):
+            fv_badge = (
+                f'<span style="font-size:9px;background:rgba(129,140,248,0.1);color:#818cf8;'
+                f'border-radius:3px;padding:1px 5px;margin-left:4px;">{t["fix_versions"][0]}</span>'
+            )
+        sprint_label = t["sprints"][-1] if t.get("sprints") else "—"
+        created_str = t.get("created_date", "")[:10] or "—"
+
+        rows_html += f"""
+        <div style="display:flex;align-items:center;gap:6px;padding:6px 0;
+            border-bottom:1px solid rgba(0,212,255,0.04);font-size:12px;flex-wrap:nowrap;">
+            {carried_badge}
+            <a href="{JIRA_BASE}/browse/{t['key']}" target="_blank"
+               style="font-family:monospace;font-size:11px;color:#00d4ff;text-decoration:none;
+                      min-width:80px;flex-shrink:0;">{t['key']}</a>
+            <span style="flex:1;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;
+                         white-space:nowrap;" title="{t['summary']}">{t['summary']}</span>
+            <span style="font-size:9px;background:{status_color}18;color:{status_color};
+                         border-radius:4px;padding:2px 6px;white-space:nowrap;flex-shrink:0;">
+                {t['status']}</span>
+            <span style="font-size:10px;color:{dev_color};white-space:nowrap;
+                         flex-shrink:0;min-width:60px;">{t['assignee'].split()[0]}</span>
+            <span style="font-size:9px;color:#334155;white-space:nowrap;
+                         flex-shrink:0;min-width:80px;overflow:hidden;text-overflow:ellipsis;"
+                  title="{sprint_label}">{sprint_label[:14]}…</span>
+            {sp_badge}{fv_badge}
+            <span style="font-size:9px;color:#334155;flex-shrink:0;">{created_str}</span>
+        </div>
+        """
+
+    st.html(f"""
+    <div style="background:rgba(13,27,62,0.4);border:1px solid rgba(0,212,255,0.08);
+        border-radius:14px;padding:14px 16px;">
+        <div style="display:flex;gap:6px;padding:4px 0 8px;border-bottom:1px solid rgba(0,212,255,0.08);
+            font-size:10px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:1px;">
+            <span style="min-width:80px;">Key</span>
+            <span style="flex:1;">Summary</span>
+            <span style="min-width:90px;">Status</span>
+            <span style="min-width:60px;">Assignee</span>
+            <span style="min-width:80px;">Sprint</span>
+            <span style="min-width:45px;">SP</span>
+            <span style="min-width:70px;">Created</span>
+        </div>
+        {rows_html}
+    </div>
+    """)
+
+    st.markdown(
+        f'<div style="font-size:10px;color:#334155;text-align:center;margin-top:8px;">'
+        f'Showing all {total_h} tickets'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # ─── MAIN APP ─────────────────────────────────────────────
 def main():
     if not check_pin():
@@ -1285,9 +1754,10 @@ def main():
                 st.cache_data.clear()
                 st.rerun()
 
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Overview", "🔥 Burndown", "⚡ Velocity", "💎 Story Points", "🎫 All Tickets", "☀️ Daily Standup"
+    # Tabs — new "📜 All History" tab added at the end
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📊 Overview", "🔥 Burndown", "⚡ Velocity", "💎 Story Points",
+        "🎫 All Tickets", "☀️ Daily Standup", "📜 All History",
     ])
     with tab1: render_overview(m, filtered_tickets)
     with tab2: render_burndown(m, sprint_days)
@@ -1295,6 +1765,7 @@ def main():
     with tab4: render_points(m)
     with tab5: render_tickets(m, filtered_tickets)
     with tab6: render_daily_report(m, filtered_tickets, sprint_name, sprint_start, sprint_days)
+    with tab7: render_all_history()
 
     # Footer
     st.markdown(f"""
