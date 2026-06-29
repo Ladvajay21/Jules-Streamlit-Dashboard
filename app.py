@@ -293,6 +293,30 @@ def get_active_sprint_dates(sprints):
     return today - timedelta(days=7), today + timedelta(days=7), "Sprint (fallback)"
 
 
+# ─── SHARED SPRINT-NAME PARSER ───────────────────────────
+def _parse_sprint_names(sprints_raw):
+    """
+    Robustly extract sprint names from customfield_10020 regardless of format.
+    Handles both Jira Cloud v3 dict objects and legacy string format.
+    Also handles displayName fallback for tickets with many historical sprints.
+    """
+    names = []
+    if not sprints_raw:
+        return names
+    if not isinstance(sprints_raw, list):
+        sprints_raw = [sprints_raw]
+    for sp in sprints_raw:
+        if isinstance(sp, dict):
+            n = sp.get("name") or sp.get("displayName") or ""
+            if n:
+                names.append(n.strip())
+        elif isinstance(sp, str):
+            hit = re.search(r'name=([^,\]]+)', sp)
+            if hit:
+                names.append(hit.group(1).strip())
+    return names
+
+
 # ─── FETCH TICKETS ────────────────────────────────────────
 @st.cache_data(ttl=300)
 def fetch_jira_tickets():
@@ -315,22 +339,8 @@ def fetch_jira_tickets():
 
         for issue in issues:
             f = issue.get("fields", {})
-            # Extract sprint names from customfield_10020
-            sprint_names = []
-            sprints_raw = f.get("customfield_10020") or []
-            if isinstance(sprints_raw, list):
-                for sp in sprints_raw:
-                    if isinstance(sp, dict):
-                        sprint_names.append(sp.get("name", ""))
-                    elif isinstance(sp, str):
-                        m = re.search(r'name=([^,\]]+)', sp)
-                        if m:
-                            sprint_names.append(m.group(1))
-
-            # Extract fix versions
-            fix_versions = []
-            for fv in (f.get("fixVersions") or []):
-                fix_versions.append(fv.get("name", ""))
+            sprint_names = _parse_sprint_names(f.get("customfield_10020"))
+            fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
 
             all_tickets.append({
                 "key": issue["key"],
@@ -372,16 +382,7 @@ def fetch_jira_tickets():
                 if key in existing_keys:
                     existing_keys[key]["status"] = new_status
                 else:
-                    sprint_names = []
-                    sprints_raw = f.get("customfield_10020") or []
-                    if isinstance(sprints_raw, list):
-                        for sp in sprints_raw:
-                            if isinstance(sp, dict):
-                                sprint_names.append(sp.get("name", ""))
-                            elif isinstance(sp, str):
-                                sm = re.search(r'name=([^,\]]+)', sp)
-                                if sm:
-                                    sprint_names.append(sm.group(1))
+                    sprint_names = _parse_sprint_names(f.get("customfield_10020"))
                     fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
                     new_ticket = {
                         "key": key,
@@ -486,99 +487,93 @@ def fetch_all_sprints_tickets():
     except Exception:
         pass
 
-    # ── 2. Fetch all tickets from all sprints via JQL ──
-    url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    # ── 2. Fetch ALL tickets that have ever been in any sprint ──
+    # Use two complementary JQL queries so we catch everything:
+    #   Pass A: ORDER BY key ASC  — catches old tickets like JENG-177
+    #   Pass B: ORDER BY created DESC — catches any the first pass may miss
+    # seen_keys deduplicates across both passes.
+    search_url = f"{JIRA_BASE}/rest/api/3/search/jql"
     all_tickets = []
     seen_keys = set()
-    start_at = 0
 
-    while True:
-        try:
-            params = {
-                "jql": f"project = {PROJECT} AND sprint is not EMPTY ORDER BY created DESC",
-                "maxResults": 100,
-                "startAt": start_at,
-                "fields": (
-                    "summary,status,assignee,reporter,customfield_10024,"
-                    "issuetype,fixVersions,customfield_10020,resolutiondate,"
-                    "created,priority,labels,customfield_10010"
-                ),
-            }
-            resp = requests.get(url, headers=jira_headers(), auth=jira_auth(),
-                                params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            issues = data.get("issues", [])
+    HISTORY_FIELDS = (
+        "summary,status,assignee,reporter,customfield_10024,"
+        "issuetype,fixVersions,customfield_10020,resolutiondate,"
+        "created,priority,labels"
+    )
 
-            for issue in issues:
-                key = issue["key"]
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                f = issue.get("fields", {})
+    def _parse_ticket(issue):
+        key = issue["key"]
+        f = issue.get("fields", {})
 
-                # Sprint names
-                sprint_names = []
-                sprints_raw = f.get("customfield_10020") or []
-                if isinstance(sprints_raw, list):
-                    for sp in sprints_raw:
-                        if isinstance(sp, dict):
-                            sprint_names.append(sp.get("name", ""))
-                        elif isinstance(sp, str):
-                            m = re.search(r'name=([^,\]]+)', sp)
-                            if m:
-                                sprint_names.append(m.group(1))
+        sprint_names = _parse_sprint_names(f.get("customfield_10020"))
+        fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
+        reporter = (f.get("reporter") or {}).get("displayName", "Unknown")
 
-                # Fix versions
-                fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
+        def _to_date(raw):
+            if not raw:
+                return ""
+            try:
+                return datetime.fromisoformat(
+                    raw.replace("Z", "+00:00")
+                ).date().isoformat()
+            except Exception:
+                return raw[:10]
 
-                # Reporter (used as proxy for "company" context if org field absent)
-                reporter = (f.get("reporter") or {}).get("displayName", "Unknown")
+        return {
+            "key": key,
+            "summary": clean_title(f.get("summary", "")),
+            "status": f.get("status", {}).get("name", "Unknown"),
+            "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+            "reporter": reporter,
+            "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
+            "type": f.get("issuetype", {}).get("name", "Task"),
+            "sprints": sprint_names,
+            "fix_versions": fix_versions,
+            "labels": f.get("labels") or [],
+            "priority": (f.get("priority") or {}).get("name", ""),
+            "created_date": _to_date(f.get("created", "")),
+            "resolution_date": _to_date(f.get("resolutiondate", "")),
+            "carried_over": len(sprint_names) > 1,
+        }
 
-                # Created date
-                created_raw = f.get("created", "")
-                created_date = ""
-                if created_raw:
-                    try:
-                        created_date = datetime.fromisoformat(
-                            created_raw.replace("Z", "+00:00")
-                        ).date().isoformat()
-                    except Exception:
-                        created_date = created_raw[:10]
+    for order in ["key ASC", "created DESC"]:
+        start_at = 0
+        consecutive_errors = 0
+        while True:
+            try:
+                params = {
+                    "jql": f"project = {PROJECT} AND sprint is not EMPTY ORDER BY {order}",
+                    "maxResults": 100,
+                    "startAt": start_at,
+                    "fields": HISTORY_FIELDS,
+                }
+                resp = requests.get(search_url, headers=jira_headers(), auth=jira_auth(),
+                                    params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                issues = data.get("issues", [])
+                consecutive_errors = 0  # reset on success
 
-                # Resolution date
-                res_raw = f.get("resolutiondate", "")
-                resolution_date = ""
-                if res_raw:
-                    try:
-                        resolution_date = datetime.fromisoformat(
-                            res_raw.replace("Z", "+00:00")
-                        ).date().isoformat()
-                    except Exception:
-                        resolution_date = res_raw[:10]
+                for issue in issues:
+                    key = issue["key"]
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    all_tickets.append(_parse_ticket(issue))
 
-                all_tickets.append({
-                    "key": key,
-                    "summary": clean_title(f.get("summary", "")),
-                    "status": f.get("status", {}).get("name", "Unknown"),
-                    "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
-                    "reporter": reporter,
-                    "sp": int(f["customfield_10024"]) if f.get("customfield_10024") else None,
-                    "type": f.get("issuetype", {}).get("name", "Task"),
-                    "sprints": sprint_names,
-                    "fix_versions": fix_versions,
-                    "labels": f.get("labels") or [],
-                    "priority": (f.get("priority") or {}).get("name", ""),
-                    "created_date": created_date,
-                    "resolution_date": resolution_date,
-                    "carried_over": len(sprint_names) > 1,
-                })
+                fetched_so_far = start_at + len(issues)
+                total_available = data.get("total", 0)
+                if fetched_so_far >= total_available or not issues:
+                    break
+                start_at += len(issues)
 
-            if start_at + len(issues) >= data.get("total", 0):
-                break
-            start_at += len(issues)
-        except Exception:
-            break
+            except Exception as exc:
+                consecutive_errors += 1
+                # Retry up to 3 times on transient errors, then move on
+                if consecutive_errors >= 3:
+                    break
+                start_at += 100  # skip the problematic page and continue
 
     # ── 3. Batch-fetch PR links for all tickets via Jira dev-info API ──
     pr_map = {}  # key -> list of {"title": ..., "url": ..., "state": ...}
