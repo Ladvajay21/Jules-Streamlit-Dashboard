@@ -1528,6 +1528,95 @@ def render_all_history():
         st.info("No historical tickets found. Check your Jira connection.")
         return
 
+    # ── DEBUG: show raw fetch info to identify missing tickets ──
+    with st.expander("🔍 Debug — Fetch diagnostics (expand to investigate missing tickets)", expanded=False):
+        # Re-run a direct count query to see what Jira says total is
+        try:
+            count_resp = requests.get(
+                f"{JIRA_BASE}/rest/api/3/search/jql",
+                headers=jira_headers(), auth=jira_auth(),
+                params={
+                    "jql": f"project = {PROJECT} AND sprint is not EMPTY ORDER BY key ASC",
+                    "maxResults": 0,
+                    "fields": "id",
+                },
+                timeout=15,
+            )
+            jira_total_sprint = count_resp.json().get("total", "error")
+        except Exception as e:
+            jira_total_sprint = f"error: {e}"
+
+        try:
+            count_resp2 = requests.get(
+                f"{JIRA_BASE}/rest/api/3/search/jql",
+                headers=jira_headers(), auth=jira_auth(),
+                params={
+                    "jql": f"project = {PROJECT} ORDER BY key ASC",
+                    "maxResults": 0,
+                    "fields": "id",
+                },
+                timeout=15,
+            )
+            jira_total_all = count_resp2.json().get("total", "error")
+        except Exception as e:
+            jira_total_all = f"error: {e}"
+
+        # Find min/max key numbers we fetched
+        fetched_nums = []
+        for t in all_tickets:
+            try:
+                fetched_nums.append(int(t["key"].split("-")[1]))
+            except Exception:
+                pass
+        fetched_nums.sort()
+
+        # Find gaps in the key sequence
+        gaps = []
+        if fetched_nums:
+            for i in range(fetched_nums[0], fetched_nums[-1] + 1):
+                if i not in set(fetched_nums):
+                    gaps.append(f"{PROJECT}-{i}")
+
+        st.markdown(f"""
+**Fetched by dashboard:** `{len(all_tickets)}` tickets  
+**Jira says (sprint is not EMPTY):** `{jira_total_sprint}` tickets  
+**Jira says (all project tickets):** `{jira_total_all}` tickets  
+**Key range fetched:** `{PROJECT}-{fetched_nums[0] if fetched_nums else '?'}` → `{PROJECT}-{fetched_nums[-1] if fetched_nums else '?'}`  
+**Gaps in key sequence (tickets with those numbers missing from fetch):** `{gaps if gaps else 'none'}`  
+**All fetched keys (sorted):** `{[f"{PROJECT}-{n}" for n in fetched_nums]}`
+        """)
+
+        # Let user directly look up a specific ticket key
+        lookup_key = st.text_input("Look up a specific ticket key (e.g. JENG-177):", key="debug_lookup")
+        if lookup_key.strip():
+            found = next((t for t in all_tickets if t["key"].upper() == lookup_key.strip().upper()), None)
+            if found:
+                st.success(f"✅ Found in fetched data: {found}")
+            else:
+                # Try fetching it directly from Jira
+                try:
+                    dr = requests.get(
+                        f"{JIRA_BASE}/rest/api/3/issue/{lookup_key.strip().upper()}",
+                        headers=jira_headers(), auth=jira_auth(),
+                        params={"fields": "summary,status,customfield_10020,fixVersions"},
+                        timeout=10,
+                    )
+                    if dr.status_code == 200:
+                        df = dr.json().get("fields", {})
+                        sprints_raw = df.get("customfield_10020") or []
+                        fvs = [fv.get("name") for fv in (df.get("fixVersions") or [])]
+                        st.error(
+                            f"❌ NOT in fetched data — but exists in Jira!\n\n"
+                            f"**Summary:** {df.get('summary')}\n\n"
+                            f"**Status:** {df.get('status', {}).get('name')}\n\n"
+                            f"**Sprint field raw value:** `{sprints_raw}`\n\n"
+                            f"**Fix versions:** {fvs}"
+                        )
+                    else:
+                        st.warning(f"Ticket not found in Jira either (HTTP {dr.status_code})")
+                except Exception as ex:
+                    st.warning(f"Error looking up ticket: {ex}")
+
     # ── Fetch PR links for all tickets (batched, cached) ──
     all_keys_tuple = tuple(t["key"] for t in all_tickets)
     with st.spinner("Loading pull request data…"):
