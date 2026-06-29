@@ -487,12 +487,7 @@ def fetch_all_sprints_tickets():
     except Exception:
         pass
 
-    # ── 2. Fetch ALL project tickets using multiple complementary strategies ──
-    # Strategy A: sprint is not EMPTY, ORDER BY key ASC  (old tickets first)
-    # Strategy B: sprint is not EMPTY, ORDER BY created DESC (newest first)
-    # Strategy C: fixVersion is not EMPTY (catches tickets assigned to a release)
-    # Strategy D: ALL project tickets ORDER BY key ASC (brute-force catch-all)
-    # seen_keys deduplicates across all strategies.
+    # ── 2. Fetch ALL project tickets — 6 complementary strategies, all deduplicated ──
     search_url = f"{JIRA_BASE}/rest/api/3/search/jql"
     all_tickets = []
     seen_keys = set()
@@ -506,7 +501,6 @@ def fetch_all_sprints_tickets():
     def _parse_ticket(issue):
         key = issue["key"]
         f = issue.get("fields", {})
-
         sprint_names = _parse_sprint_names(f.get("customfield_10020"))
         fix_versions = [fv.get("name", "") for fv in (f.get("fixVersions") or [])]
         reporter = (f.get("reporter") or {}).get("displayName", "Unknown")
@@ -538,95 +532,125 @@ def fetch_all_sprints_tickets():
             "carried_over": len(sprint_names) > 1,
         }
 
+    def _ingest(issue, sprint_name_hint=None):
+        """Parse and store a ticket; safe to call multiple times for same key."""
+        key = issue["key"]
+        if key in seen_keys:
+            # Already stored — but still try to backfill sprint hint
+            if sprint_name_hint:
+                for t in all_tickets:
+                    if t["key"] == key:
+                        if sprint_name_hint not in t["sprints"]:
+                            t["sprints"].append(sprint_name_hint)
+                            t["carried_over"] = len(t["sprints"]) > 1
+                        break
+            return
+        seen_keys.add(key)
+        ticket = _parse_ticket(issue)
+        if sprint_name_hint and sprint_name_hint not in ticket["sprints"]:
+            ticket["sprints"].append(sprint_name_hint)
+            ticket["carried_over"] = len(ticket["sprints"]) > 1
+        all_tickets.append(ticket)
+
     def _run_jql_pass(jql):
-        """Paginate through a JQL query and add unseen tickets to all_tickets."""
+        """Paginate fully through a JQL query, ingesting every result."""
         start_at = 0
         consecutive_errors = 0
         while True:
             try:
-                params = {
-                    "jql": jql,
-                    "maxResults": 100,
-                    "startAt": start_at,
-                    "fields": HISTORY_FIELDS,
-                }
-                resp = requests.get(search_url, headers=jira_headers(), auth=jira_auth(),
-                                    params=params, timeout=30)
+                resp = requests.get(
+                    search_url, headers=jira_headers(), auth=jira_auth(),
+                    params={"jql": jql, "maxResults": 100,
+                            "startAt": start_at, "fields": HISTORY_FIELDS},
+                    timeout=30,
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 issues = data.get("issues", [])
                 consecutive_errors = 0
-
                 for issue in issues:
-                    key = issue["key"]
-                    if key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    all_tickets.append(_parse_ticket(issue))
-
-                fetched_so_far = start_at + len(issues)
-                total_available = data.get("total", 0)
-                if fetched_so_far >= total_available or not issues:
+                    _ingest(issue)
+                fetched = start_at + len(issues)
+                if fetched >= data.get("total", 0) or not issues:
                     break
                 start_at += len(issues)
-
             except Exception:
                 consecutive_errors += 1
                 if consecutive_errors >= 3:
                     break
-                start_at += 100  # skip bad page, keep going
+                start_at += 100
 
-    # Strategy A — sprint-based, old-to-new (primary)
-    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY key ASC")
-    # Strategy B — sprint-based, new-to-old (catches any A missed)
-    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY created DESC")
-    # Strategy C — fix-version based (catches tickets like JENG-177 that have
-    #              a fixVersion but may not index cleanly under "sprint is not EMPTY")
-    _run_jql_pass(f"project = {PROJECT} AND fixVersion is not EMPTY ORDER BY key ASC")
-    # Strategy D — brute-force: every ticket in the project, oldest first.
-    #              This is the ultimate catch-all. We cap at 2000 tickets to stay
-    #              within Jira's maxResults limit but cover the full project history.
-    _run_jql_pass(f"project = {PROJECT} ORDER BY key ASC")
-
-    # Strategy E — fetch tickets directly from each sprint via the Agile board API.
-    #              This bypasses JQL indexing entirely — guaranteed to match what
-    #              Jira's own board UI shows, even for tickets that JQL misses.
+    # ── Strategy 1 (PRIMARY): Agile board API per sprint ──────────────────────
+    # This is what Jira's own board UI uses — bypasses JQL indexing completely.
+    # Runs FIRST so board-accurate data is the foundation everything else adds to.
     if board_id and all_sprint_meta:
         for sprint_meta in all_sprint_meta:
             sprint_id = sprint_meta["id"]
-            sprint_start_at = 0
+            sprint_name = sprint_meta.get("name", "")
+            s_at = 0
             while True:
                 try:
-                    agile_url = f"{JIRA_BASE}/rest/agile/1.0/sprint/{sprint_id}/issue"
-                    agile_params = {
-                        "maxResults": 100,
-                        "startAt": sprint_start_at,
-                        "fields": HISTORY_FIELDS,
-                    }
-                    ar = requests.get(agile_url, auth=jira_auth(), headers=jira_headers(),
-                                      params=agile_params, timeout=30)
+                    ar = requests.get(
+                        f"{JIRA_BASE}/rest/agile/1.0/sprint/{sprint_id}/issue",
+                        auth=jira_auth(), headers=jira_headers(),
+                        params={"maxResults": 100, "startAt": s_at,
+                                "fields": HISTORY_FIELDS},
+                        timeout=30,
+                    )
                     ar.raise_for_status()
                     adata = ar.json()
                     a_issues = adata.get("issues", [])
-
                     for issue in a_issues:
-                        key = issue["key"]
-                        if key in seen_keys:
-                            continue
-                        seen_keys.add(key)
-                        ticket = _parse_ticket(issue)
-                        # Ensure the sprint name from meta is recorded if parser missed it
-                        if sprint_meta["name"] and sprint_meta["name"] not in ticket["sprints"]:
-                            ticket["sprints"].append(sprint_meta["name"])
-                        ticket["carried_over"] = len(ticket["sprints"]) > 1
-                        all_tickets.append(ticket)
-
-                    fetched = sprint_start_at + len(a_issues)
+                        _ingest(issue, sprint_name_hint=sprint_name)
+                    fetched = s_at + len(a_issues)
                     if fetched >= adata.get("total", 0) or not a_issues:
                         break
-                    sprint_start_at += len(a_issues)
+                    s_at += len(a_issues)
                 except Exception:
                     break
+
+    # ── Strategy 2: sprint is not EMPTY, key ASC (old tickets first) ──────────
+    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY key ASC")
+
+    # ── Strategy 3: sprint is not EMPTY, key DESC (new tickets first) ─────────
+    # Jira Cloud caps JQL pagination at ~1000. Running both ASC and DESC means
+    # we get the first 1000 oldest AND the first 1000 newest, covering both ends.
+    _run_jql_pass(f"project = {PROJECT} AND sprint is not EMPTY ORDER BY key DESC")
+
+    # ── Strategy 4: fixVersion is not EMPTY ───────────────────────────────────
+    # Catches tickets that have a release fix version regardless of sprint index.
+    _run_jql_pass(f"project = {PROJECT} AND fixVersion is not EMPTY ORDER BY key ASC")
+    _run_jql_pass(f"project = {PROJECT} AND fixVersion is not EMPTY ORDER BY key DESC")
+
+    # ── Strategy 5: all project tickets, key ASC then DESC ────────────────────
+    # Ultimate JQL catch-all — both directions to beat the 1000-result window.
+    _run_jql_pass(f"project = {PROJECT} ORDER BY key ASC")
+    _run_jql_pass(f"project = {PROJECT} ORDER BY key DESC")
+
+    # ── Strategy 6: key-range chunked fetch ───────────────────────────────────
+    # Splits the key space into windows of 200 ticket numbers to guarantee
+    # every ticket is reachable regardless of JQL offset limits.
+    if all_tickets:
+        try:
+            all_nums = []
+            for t in all_tickets:
+                try:
+                    all_nums.append(int(t["key"].split("-")[1]))
+                except Exception:
+                    pass
+            if all_nums:
+                min_num = max(1, min(all_nums) - 10)
+                max_num = max(all_nums) + 20
+                CHUNK = 200
+                for chunk_start in range(min_num, max_num + 1, CHUNK):
+                    chunk_end = chunk_start + CHUNK - 1
+                    chunk_jql = (
+                        f'project = {PROJECT} AND issueKey >= "{PROJECT}-{chunk_start}" '
+                        f'AND issueKey <= "{PROJECT}-{chunk_end}" ORDER BY key ASC'
+                    )
+                    _run_jql_pass(chunk_jql)
+        except Exception:
+            pass
 
     # ── 3. Batch-fetch PR links for all tickets via Jira dev-info API ──
     pr_map = {}  # key -> list of {"title": ..., "url": ..., "state": ...}
