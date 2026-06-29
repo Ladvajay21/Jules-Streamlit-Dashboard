@@ -652,111 +652,83 @@ def fetch_all_sprints_tickets():
         except Exception:
             pass
 
-    # ── 3. Batch-fetch PR links for all tickets via Jira dev-info API ──
-    pr_map = {}  # key -> list of {"title": ..., "url": ..., "state": ...}
-    for ticket in all_tickets:
-        try:
-            dev_url = (
-                f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail"
-                f"?issueId={ticket['key']}&applicationType=github&dataType=pullrequest"
-            )
-            # Jira dev-info needs the numeric issue ID, not the key — fetch it
-            # We'll use the search result's id field; re-query per ticket only if needed
-            # Use the simpler endpoint that accepts issue key via a different param
-            dev_url2 = (
-                f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
-                f"?issueId={ticket['key']}&applicationType=github&dataType=pullrequest"
-            )
-            dr = requests.get(dev_url2, auth=jira_auth(), headers=jira_headers(), timeout=10)
-            if dr.status_code == 200:
-                detail = dr.json().get("detail", [])
-                prs = []
-                for d in detail:
-                    for pr in d.get("pullRequests", []):
-                        prs.append({
-                            "title": pr.get("name", pr.get("id", "PR")),
-                            "url": pr.get("url", ""),
-                            "state": pr.get("status", pr.get("state", "")),
-                        })
-                if prs:
-                    pr_map[ticket["key"]] = prs
-        except Exception:
-            pass
-
-    # Attach PR data to each ticket
-    for ticket in all_tickets:
-        ticket["pull_requests"] = pr_map.get(ticket["key"], [])
-
     return all_tickets, all_sprint_meta
 
 
-# ─── FETCH PR FOR A SINGLE ISSUE (uses numeric issue ID) ──
+# ─── FETCH PRs FOR ALL ISSUES (numeric ID resolution) ────
 @st.cache_data(ttl=600)
 def fetch_prs_for_issues(issue_keys_tuple):
     """
     Fetch PR links for a tuple of issue keys using Jira's dev-status API.
     Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
-    The dev-status endpoint needs the numeric Jira issue ID, so we first
-    resolve keys → IDs, then call the dev-status endpoint in bulk.
+
+    The dev-status endpoint REQUIRES the numeric Jira issue ID (not the key).
+    We resolve key → numeric ID by hitting /rest/api/3/issue/{key}?fields=id
+    which is the most reliable approach.
     """
     if not issue_keys_tuple:
         return {}
 
     pr_map = {}
+    dev_base = f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
 
-    # Step 1: resolve issue keys to numeric IDs
-    search_url = f"{JIRA_BASE}/rest/api/3/search/jql"
+    # Resolve keys → numeric IDs in batches via search API
     key_to_id = {}
     keys_list = list(issue_keys_tuple)
-
-    for batch_start in range(0, len(keys_list), 100):
-        batch = keys_list[batch_start: batch_start + 100]
+    for batch_start in range(0, len(keys_list), 50):
+        batch = keys_list[batch_start: batch_start + 50]
         jql = "issueKey in (" + ",".join(batch) + ")"
         try:
             r = requests.get(
-                search_url, auth=jira_auth(), headers=jira_headers(),
-                params={"jql": jql, "maxResults": 100, "fields": "id"},
+                f"{JIRA_BASE}/rest/api/3/search/jql",
+                auth=jira_auth(), headers=jira_headers(),
+                params={"jql": jql, "maxResults": 50, "fields": "id"},
                 timeout=20,
             )
             r.raise_for_status()
             for iss in r.json().get("issues", []):
+                # iss["id"] is the numeric string e.g. "123456"
                 key_to_id[iss["key"]] = iss["id"]
         except Exception:
-            pass
+            # Fallback: resolve individually for this batch
+            for key in batch:
+                try:
+                    ir = requests.get(
+                        f"{JIRA_BASE}/rest/api/3/issue/{key}",
+                        auth=jira_auth(), headers=jira_headers(),
+                        params={"fields": "id"}, timeout=10,
+                    )
+                    if ir.status_code == 200:
+                        key_to_id[key] = ir.json()["id"]
+                except Exception:
+                    pass
 
-    # Step 2: call dev-status per issue
-    dev_base = f"{JIRA_BASE}/rest/dev-status/latest/issue/detail"
+    # Call dev-status per issue using numeric ID
     for key, issue_id in key_to_id.items():
-        try:
-            dr = requests.get(
-                dev_base,
-                auth=jira_auth(), headers=jira_headers(),
-                params={"issueId": issue_id, "applicationType": "github",
-                        "dataType": "pullrequest"},
-                timeout=10,
-            )
-            if dr.status_code != 200:
-                # Try without applicationType filter to catch GitLab / Bitbucket too
+        prs = []
+        for app_type in [None, "github", "gitlab", "bitbucket"]:
+            try:
+                params = {"issueId": issue_id, "dataType": "pullrequest"}
+                if app_type:
+                    params["applicationType"] = app_type
                 dr = requests.get(
-                    dev_base,
-                    auth=jira_auth(), headers=jira_headers(),
-                    params={"issueId": issue_id, "dataType": "pullrequest"},
-                    timeout=10,
+                    dev_base, auth=jira_auth(), headers=jira_headers(),
+                    params=params, timeout=10,
                 )
-            if dr.status_code == 200:
-                prs = []
-                for detail in dr.json().get("detail", []):
-                    for pr in detail.get("pullRequests", []):
-                        state = pr.get("status", pr.get("state", "")).upper()
-                        prs.append({
-                            "title": pr.get("name") or pr.get("id") or "PR",
-                            "url": pr.get("url", ""),
-                            "state": state,
-                        })
-                if prs:
-                    pr_map[key] = prs
-        except Exception:
-            pass
+                if dr.status_code == 200:
+                    for detail in dr.json().get("detail", []):
+                        for pr in detail.get("pullRequests", []):
+                            state = pr.get("status", pr.get("state", "")).upper()
+                            url = pr.get("url", "")
+                            title = pr.get("name") or pr.get("id") or "PR"
+                            if url and not any(p["url"] == url for p in prs):
+                                prs.append({"title": title, "url": url, "state": state})
+                    if prs:
+                        break  # found PRs, no need to try other app types
+            except Exception:
+                pass
+        if prs:
+            pr_map[key] = prs
 
     return pr_map
 
@@ -1591,7 +1563,7 @@ def render_all_history():
         if lookup_key.strip():
             found = next((t for t in all_tickets if t["key"].upper() == lookup_key.strip().upper()), None)
             if found:
-                st.success(f"✅ Found in fetched data: {found}")
+                st.success(f"✅ Found in fetched data: sprints={found['sprints']} | fix_versions={found['fix_versions']} | created={found.get('created_date')}")
             else:
                 # Try fetching it directly from Jira
                 try:
@@ -1617,17 +1589,36 @@ def render_all_history():
                 except Exception as ex:
                     st.warning(f"Error looking up ticket: {ex}")
 
+        # Show which tickets are currently being filtered OUT and why
+        if sel_sprint != "🏃 All Sprints":
+            sel_sprint_norm = sel_sprint.strip().lower()
+            dropped_by_sprint = [
+                t for t in all_tickets
+                if not any(sel_sprint_norm in s.strip().lower() for s in t.get("sprints", []))
+                and sel_fv in (["📦 All Fix Versions"] + [sel_fv]) and sel_fv in t.get("fix_versions", [sel_fv])
+            ]
+            # Simpler: just show all tickets that have the fixVersion but fail sprint match
+            if sel_fv != "📦 All Fix Versions":
+                fv_matches = [t for t in all_tickets if sel_fv in t.get("fix_versions", [])]
+                sprint_also_matches = [t for t in fv_matches if any(sel_sprint_norm in s.strip().lower() for s in t.get("sprints", []))]
+                sprint_dropped = [t for t in fv_matches if t not in sprint_also_matches]
+                if sprint_dropped:
+                    st.warning(f"⚠️ {len(sprint_dropped)} tickets have Fix Version '{sel_fv}' but are dropped by Sprint filter '{sel_sprint}':")
+                    for t in sprint_dropped[:20]:
+                        st.markdown(f"- `{t['key']}` sprints=`{t['sprints']}` created=`{t.get('created_date')}`")
+
     # ── Fetch PR links for all tickets (batched, cached) ──
+    # fetch_prs_for_issues correctly resolves key → numeric ID before calling
+    # the dev-status API, so PRs are actually returned.
     all_keys_tuple = tuple(t["key"] for t in all_tickets)
     with st.spinner("Loading pull request data…"):
         try:
             pr_map = fetch_prs_for_issues(all_keys_tuple)
         except Exception:
             pr_map = {}
-    # Attach to tickets
+    # Always overwrite pull_requests — never skip, never trust stale cached []
     for t in all_tickets:
-        if "pull_requests" not in t:
-            t["pull_requests"] = pr_map.get(t["key"], [])
+        t["pull_requests"] = pr_map.get(t["key"], [])
 
     # ── Build filter option lists ──
 
@@ -1771,7 +1762,13 @@ def render_all_history():
     filtered = list(all_tickets)
 
     if sel_sprint != "🏃 All Sprints":
-        filtered = [t for t in filtered if sel_sprint in t.get("sprints", [])]
+        # Normalise both sides: strip whitespace, case-insensitive contains match
+        # so "Sprint 9" matches "Sprint 9 ", "sprint 9", "Sprint 9 (Copy)", etc.
+        sel_sprint_norm = sel_sprint.strip().lower()
+        filtered = [
+            t for t in filtered
+            if any(sel_sprint_norm in s.strip().lower() for s in t.get("sprints", []))
+        ]
 
     if sel_assignee != "👤 All Assignees":
         filtered = [t for t in filtered if t["assignee"] == sel_assignee]
@@ -1789,12 +1786,15 @@ def render_all_history():
         elif sel_status == "📋 To Do":
             filtered = [t for t in filtered if t["status"] == "To Do"]
 
-    # Date filter on created_date
-    filtered = [
-        t for t in filtered
-        if t.get("created_date") and
-           date_from <= date.fromisoformat(t["created_date"]) <= date_to
-    ]
+    # Date filter — only apply when the user has narrowed the range from defaults.
+    # Tickets with no created_date are NEVER dropped; they always pass through.
+    date_filter_active = (date_from > min_date or date_to < max_date)
+    if date_filter_active:
+        filtered = [
+            t for t in filtered
+            if not t.get("created_date")  # no date → keep always
+            or date_from <= date.fromisoformat(t["created_date"]) <= date_to
+        ]
 
     # Text search
     if search_text.strip():
