@@ -659,26 +659,30 @@ def fetch_all_sprints_tickets():
 @st.cache_data(ttl=600)
 def fetch_prs_for_issues(issue_keys_tuple):
     """
-    Fetch PR links for a small tuple of issue keys (the filtered/visible set only).
+    Fetch PR links for a small tuple of issue keys.
     Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
-    Tries multiple endpoint variants to handle different Jira Cloud configurations.
+
+    Strategy:
+    1. Try Jira dev-status API with numeric ID (standard approach)
+    2. Try remoteLinks API — Jira stores linked PRs as remote issue links
+    3. Parse PR URLs from the issue's development panel via renderedFields
     """
     if not issue_keys_tuple:
         return {}
 
     pr_map = {}
-
-    # ── Step 1: resolve keys → numeric IDs via batched JQL ──
-    key_to_id = {}
     keys_list = list(issue_keys_tuple)
+
+    # ── Step 1: resolve keys → numeric IDs ──
+    key_to_id = {}
     for batch_start in range(0, len(keys_list), 50):
         batch = keys_list[batch_start: batch_start + 50]
-        jql = "issueKey in (" + ",".join(batch) + ")"
         try:
             r = requests.get(
                 f"{JIRA_BASE}/rest/api/3/search/jql",
                 auth=jira_auth(), headers=jira_headers(),
-                params={"jql": jql, "maxResults": 50, "fields": "id"},
+                params={"jql": "issueKey in (" + ",".join(batch) + ")",
+                        "maxResults": 50, "fields": "id"},
                 timeout=20,
             )
             if r.status_code == 200:
@@ -687,58 +691,107 @@ def fetch_prs_for_issues(issue_keys_tuple):
         except Exception:
             pass
 
-    if not key_to_id:
-        return {}
+    # ── Strategy A: dev-status API (all known endpoint variants) ──
+    dev_endpoints = [
+        f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
+        f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
+        f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
+        f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/1.0/issue/detail",
+    ]
+    # Find working endpoint with a single test call on first key
+    working_dev_endpoint = None
+    test_id = next(iter(key_to_id.values()), None) if key_to_id else None
+    if test_id:
+        for ep in dev_endpoints:
+            try:
+                tr = requests.get(ep, auth=jira_auth(), headers=jira_headers(),
+                                  params={"issueId": test_id, "dataType": "pullrequest"},
+                                  timeout=8)
+                if tr.status_code == 200:
+                    working_dev_endpoint = ep
+                    break
+            except Exception:
+                pass
 
-    # ── Step 2: try every known endpoint variant per issue ──
-    # Jira Cloud exposes dev-status under different paths depending on
-    # the instance setup. We try all variants and use the first that works.
-    def _dev_status_endpoints(issue_id):
-        return [
-            # Standard Jira Cloud dev-status
-            f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
-            f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
-            # Atlassian API gateway (uses cloud ID)
-            f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
-            f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/1.0/issue/detail",
-        ]
+    if working_dev_endpoint:
+        for key, issue_id in key_to_id.items():
+            try:
+                dr = requests.get(
+                    working_dev_endpoint, auth=jira_auth(), headers=jira_headers(),
+                    params={"issueId": issue_id, "dataType": "pullrequest"},
+                    timeout=8,
+                )
+                if dr.status_code == 200:
+                    prs = []
+                    for detail in dr.json().get("detail", []):
+                        for pr in detail.get("pullRequests", []):
+                            url = pr.get("url", "")
+                            if url and not any(p["url"] == url for p in prs):
+                                prs.append({
+                                    "title": pr.get("name") or pr.get("id") or "PR",
+                                    "url": url,
+                                    "state": pr.get("status", pr.get("state", "")).upper(),
+                                })
+                    if prs:
+                        pr_map[key] = prs
+            except Exception:
+                pass
 
-    def _extract_prs(response_json):
-        prs = []
-        for detail in response_json.get("detail", []):
-            for pr in detail.get("pullRequests", []):
-                url = pr.get("url", "")
-                if url and not any(p["url"] == url for p in prs):
-                    prs.append({
-                        "title": pr.get("name") or pr.get("id") or "PR",
-                        "url": url,
-                        "state": pr.get("status", pr.get("state", "")).upper(),
-                    })
-        return prs
+    # ── Strategy B: remoteLinks API ──
+    # Jira stores GitHub/GitLab PR links as "remote issue links" with a globalId
+    # containing the PR URL. This works even when dev-status is inaccessible.
+    keys_needing_prs = [k for k in keys_list if k not in pr_map]
+    for key in keys_needing_prs:
+        try:
+            rl = requests.get(
+                f"{JIRA_BASE}/rest/api/3/issue/{key}/remotelink",
+                auth=jira_auth(), headers=jira_headers(),
+                timeout=8,
+            )
+            if rl.status_code == 200:
+                prs = []
+                for link in rl.json():
+                    obj = link.get("object", {})
+                    url = obj.get("url", "")
+                    title = obj.get("title", "")
+                    # GitHub/GitLab PR URLs contain /pull/ or /merge_requests/
+                    if url and ("/pull/" in url or "/merge_requests/" in url):
+                        # Infer state from title or relationship
+                        state = "MERGED" if "merged" in title.lower() else \
+                                "OPEN" if "open" in title.lower() else "UNKNOWN"
+                        if not any(p["url"] == url for p in prs):
+                            prs.append({"title": title or "PR", "url": url, "state": state})
+                if prs:
+                    pr_map[key] = prs
+        except Exception:
+            pass
 
-    for key, issue_id in key_to_id.items():
-        prs = []
-        for endpoint in _dev_status_endpoints(issue_id):
-            if prs:
-                break
-            # Try without applicationType (returns all providers at once)
-            for params in [
-                {"issueId": issue_id, "dataType": "pullrequest"},
-                {"issueId": issue_id},  # no filter at all
-            ]:
-                try:
-                    dr = requests.get(
-                        endpoint, auth=jira_auth(), headers=jira_headers(),
-                        params=params, timeout=8,
+    # ── Strategy C: issue renderedFields — extracts PR links from HTML ──
+    # Jira's renderedFields sometimes embeds PR data in the development panel.
+    keys_needing_prs = [k for k in keys_list if k not in pr_map]
+    if keys_needing_prs:
+        import re as _re
+        for key in keys_needing_prs[:20]:  # cap at 20 to stay fast
+            try:
+                ir = requests.get(
+                    f"{JIRA_BASE}/rest/api/3/issue/{key}",
+                    auth=jira_auth(), headers=jira_headers(),
+                    params={"expand": "renderedFields", "fields": "renderedFields"},
+                    timeout=8,
+                )
+                if ir.status_code == 200:
+                    rendered = str(ir.json().get("renderedFields", {}))
+                    # Extract GitHub/GitLab PR URLs
+                    urls = _re.findall(
+                        r'https://(?:github\.com|gitlab\.com)/[^\s\'"<>]+/(?:pull|merge_requests)/\d+',
+                        rendered
                     )
-                    if dr.status_code == 200:
-                        prs = _extract_prs(dr.json())
-                        if prs:
-                            break
-                except Exception:
-                    pass
-        if prs:
-            pr_map[key] = prs
+                    if urls:
+                        prs = [{"title": u.split("/")[-1] and f"PR #{u.split('/')[-1]}" or "PR",
+                                "url": u, "state": "UNKNOWN"} for u in set(urls)]
+                        pr_map[key] = prs
+            except Exception:
+                pass
 
     return pr_map
 
@@ -1568,6 +1621,59 @@ def render_all_history():
 **All fetched keys (sorted):** `{[f"{PROJECT}-{n}" for n in fetched_nums]}`
         """)
 
+        # ── Cache clear button ──
+        if st.button("🗑️ Clear ALL caches (force re-fetch PRs)", key="clr_cache_debug"):
+            st.cache_data.clear()
+            st.rerun()
+
+        # ── Auto PR diagnostic on JENG-877 (always runs) ──
+        st.markdown("---")
+        st.markdown("**🔗 Auto PR diagnostic — JENG-877** (runs every time, no cache)")
+        try:
+            id_resp = requests.get(
+                f"{JIRA_BASE}/rest/api/3/issue/JENG-877",
+                headers=jira_headers(), auth=jira_auth(),
+                params={"fields": "id"}, timeout=10,
+            )
+            if id_resp.status_code == 200:
+                numeric_id = id_resp.json().get("id")
+                st.markdown(f"Numeric ID: `{numeric_id}`")
+                st.markdown("**Dev-status endpoints:**")
+                for ep in [
+                    f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
+                    f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
+                    f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
+                ]:
+                    for p in [
+                        {"issueId": numeric_id, "dataType": "pullrequest"},
+                        {"issueId": numeric_id},
+                    ]:
+                        try:
+                            r = requests.get(ep, auth=jira_auth(), headers=jira_headers(),
+                                             params=p, timeout=10)
+                            short = ep.split("/rest/")[1]
+                            st.markdown(f"`{short}` `{p}` → **HTTP {r.status_code}**")
+                            if r.status_code == 200:
+                                st.json(r.json())
+                        except Exception as pe:
+                            st.markdown(f"Error: {pe}")
+
+                st.markdown("**RemoteLinks API:**")
+                try:
+                    rl = requests.get(
+                        f"{JIRA_BASE}/rest/api/3/issue/JENG-877/remotelink",
+                        auth=jira_auth(), headers=jira_headers(), timeout=10,
+                    )
+                    st.markdown(f"HTTP {rl.status_code}")
+                    if rl.status_code == 200:
+                        st.json(rl.json())
+                except Exception as rle:
+                    st.markdown(f"Error: {rle}")
+            else:
+                st.warning(f"Could not resolve JENG-877 ID: HTTP {id_resp.status_code}")
+        except Exception as de:
+            st.warning(f"Auto diagnostic error: {de}")
+
         # Let user directly look up a specific ticket key
         lookup_key = st.text_input("Look up a specific ticket key (e.g. JENG-177):", key="debug_lookup")
         if lookup_key.strip():
@@ -1953,7 +2059,7 @@ def render_all_history():
             f'<span style="font-size:9px;background:rgba(251,146,60,0.12);color:#fb923c;'
             f'border-radius:3px;padding:1px 5px;">{t["sp"]} SP</span>'
             if t["sp"] else
-            '<span style="font-size:9px;color:#334155;">— SP</span>'
+            '<span style="font-size:9px;color:#475569;">— SP</span>'
         )
         carried_badge = (
             '<span style="font-size:9px;background:rgba(251,191,36,0.1);border:1px solid '
@@ -1996,46 +2102,53 @@ def render_all_history():
                 )
             pr_cell = f'<div style="min-width:110px;flex-shrink:0;overflow:hidden;">{pr_links}</div>'
         else:
-            pr_cell = '<div style="min-width:110px;flex-shrink:0;font-size:9px;color:#1e2d47;">—</div>'
+            pr_cell = '<div style="min-width:110px;flex-shrink:0;font-size:9px;color:#475569;">—</div>'
 
         rows_html += f"""
-        <div style="display:flex;align-items:center;gap:6px;padding:6px 0;
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;
             border-bottom:1px solid rgba(0,212,255,0.04);font-size:12px;flex-wrap:nowrap;">
-            {carried_badge}
-            <a href="{JIRA_BASE}/browse/{t['key']}" target="_blank"
-               style="font-family:monospace;font-size:11px;color:#00d4ff;text-decoration:none;
-                      min-width:80px;flex-shrink:0;">{t['key']}</a>
-            <span style="flex:1;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;
-                         white-space:nowrap;" title="{t['summary']}">{t['summary']}</span>
-            <span style="font-size:9px;background:{status_color}18;color:{status_color};
-                         border-radius:4px;padding:2px 6px;white-space:nowrap;flex-shrink:0;">
-                {t['status']}</span>
-            <span style="font-size:10px;color:{dev_color};white-space:nowrap;
-                         flex-shrink:0;min-width:60px;">{t['assignee'].split()[0]}</span>
-            <span style="font-size:9px;color:#334155;white-space:nowrap;
-                         flex-shrink:0;min-width:80px;overflow:hidden;text-overflow:ellipsis;"
-                  title="{sprint_label}">{sprint_label[:14]}…</span>
-            {sp_badge}{fv_badge}
-            {pr_cell}
-            <span style="font-size:9px;color:#334155;flex-shrink:0;">{created_str}</span>
+            <div style="width:90px;flex-shrink:0;display:flex;align-items:center;gap:3px;">
+                {carried_badge}
+                <a href="{JIRA_BASE}/browse/{t['key']}" target="_blank"
+                   style="font-family:monospace;font-size:11px;color:#00d4ff;text-decoration:none;">{t['key']}</a>
+            </div>
+            <div style="flex:1;min-width:0;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;
+                         white-space:nowrap;" title="{t['summary']}">{t['summary']}</div>
+            <div style="width:95px;flex-shrink:0;">
+                <span style="font-size:9px;background:{status_color}25;color:{status_color};
+                             border-radius:4px;padding:2px 7px;white-space:nowrap;font-weight:600;">
+                    {t['status']}</span>
+            </div>
+            <div style="width:70px;flex-shrink:0;color:{dev_color};font-size:11px;font-weight:600;
+                        white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{t['assignee'].split()[0]}</div>
+            <div style="width:85px;flex-shrink:0;color:#94a3b8;font-size:10px;white-space:nowrap;
+                        overflow:hidden;text-overflow:ellipsis;" title="{sprint_label}">{sprint_label[:13]}</div>
+            <div style="width:50px;flex-shrink:0;">{sp_badge}</div>
+            <div style="width:90px;flex-shrink:0;">{fv_badge}</div>
+            <div style="width:130px;flex-shrink:0;overflow:hidden;">{pr_cell}</div>
+            <div style="width:75px;flex-shrink:0;color:#94a3b8;font-size:10px;white-space:nowrap;">{created_str}</div>
         </div>
         """
 
     st.html(f"""
     <div style="background:rgba(13,27,62,0.4);border:1px solid rgba(0,212,255,0.08);
-        border-radius:14px;padding:14px 16px;">
-        <div style="display:flex;gap:6px;padding:4px 0 8px;border-bottom:1px solid rgba(0,212,255,0.08);
-            font-size:10px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:1px;">
-            <span style="min-width:80px;">Key</span>
-            <span style="flex:1;">Summary</span>
-            <span style="min-width:90px;">Status</span>
-            <span style="min-width:60px;">Assignee</span>
-            <span style="min-width:80px;">Sprint</span>
-            <span style="min-width:45px;">SP</span>
-            <span style="min-width:110px;">Pull Request</span>
-            <span style="min-width:70px;">Created</span>
+        border-radius:14px;padding:14px 16px;overflow-x:auto;">
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 0 10px;
+            border-bottom:1px solid rgba(0,212,255,0.08);min-width:900px;
+            font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;">
+            <div style="width:90px;flex-shrink:0;">Key</div>
+            <div style="flex:1;min-width:200px;">Summary</div>
+            <div style="width:95px;flex-shrink:0;">Status</div>
+            <div style="width:70px;flex-shrink:0;">Assignee</div>
+            <div style="width:85px;flex-shrink:0;">Sprint</div>
+            <div style="width:50px;flex-shrink:0;">SP</div>
+            <div style="width:90px;flex-shrink:0;">Fix Version</div>
+            <div style="width:130px;flex-shrink:0;">Pull Request</div>
+            <div style="width:75px;flex-shrink:0;">Created</div>
         </div>
+        <div style="min-width:900px;">
         {rows_html}
+        </div>
     </div>
     """)
 
