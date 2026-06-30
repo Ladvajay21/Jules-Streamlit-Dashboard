@@ -237,8 +237,10 @@ def clean_title(s):
 
 def build_tickets_excel(tickets, filter_summary=""):
     """
-    Build an in-memory .xlsx file from a list of ticket dicts.
-    Returns bytes ready for st.download_button.
+    Build an in-memory spreadsheet file from a list of ticket dicts.
+    Tries .xlsx via openpyxl, then xlsxwriter, then falls back to CSV
+    if neither Excel engine is installed on the server.
+    Returns (bytes, file_extension, mime_type).
     """
     rows = []
     for t in tickets:
@@ -265,54 +267,105 @@ def build_tickets_excel(tickets, filter_summary=""):
 
     df = pd.DataFrame(rows)
 
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Tickets")
-        ws = writer.sheets["Tickets"]
-
-        # Header styling
+    # ── Try openpyxl first ──
+    try:
+        import openpyxl  # noqa: F401
         from openpyxl.styles import Font, PatternFill, Alignment
-        header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
-        header_font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Column widths
-        widths = {
-            "A": 12, "B": 48, "C": 16, "D": 16, "E": 16, "F": 12,
-            "G": 12, "H": 22, "I": 18, "J": 12, "K": 20, "L": 12,
-            "M": 14, "N": 14, "O": 40, "P": 32,
-        }
-        for col, width in widths.items():
-            ws.column_dimensions[col].width = width
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Tickets")
+            ws = writer.sheets["Tickets"]
 
-        # Freeze header row
-        ws.freeze_panes = "A2"
+            header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Body font
-        body_font = Font(name="Arial", size=10)
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                cell.font = body_font
+            widths = {
+                "A": 12, "B": 48, "C": 16, "D": 16, "E": 16, "F": 12,
+                "G": 12, "H": 22, "I": 18, "J": 12, "K": 20, "L": 12,
+                "M": 14, "N": 14, "O": 40, "P": 32,
+            }
+            for col, width in widths.items():
+                ws.column_dimensions[col].width = width
+            ws.freeze_panes = "A2"
 
-        # Add a small metadata sheet with the applied filters
-        if filter_summary:
-            meta_ws = writer.book.create_sheet("Filters Applied")
-            meta_ws["A1"] = "Export generated"
-            meta_ws["B1"] = datetime.now().strftime("%d %b %Y, %H:%M")
-            meta_ws["A2"] = "Filters applied"
-            meta_ws["B2"] = filter_summary
-            meta_ws["A3"] = "Total tickets exported"
-            meta_ws["B3"] = len(rows)
-            meta_ws.column_dimensions["A"].width = 24
-            meta_ws.column_dimensions["B"].width = 60
-            for cell in [meta_ws["A1"], meta_ws["A2"], meta_ws["A3"]]:
-                cell.font = Font(bold=True, name="Arial", size=10)
+            body_font = Font(name="Arial", size=10)
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.font = body_font
 
-    buffer.seek(0)
-    return buffer.getvalue()
+            if filter_summary:
+                meta_ws = writer.book.create_sheet("Filters Applied")
+                meta_ws["A1"] = "Export generated"
+                meta_ws["B1"] = datetime.now().strftime("%d %b %Y, %H:%M")
+                meta_ws["A2"] = "Filters applied"
+                meta_ws["B2"] = filter_summary
+                meta_ws["A3"] = "Total tickets exported"
+                meta_ws["B3"] = len(rows)
+                meta_ws.column_dimensions["A"].width = 24
+                meta_ws.column_dimensions["B"].width = 60
+                for cell in [meta_ws["A1"], meta_ws["A2"], meta_ws["A3"]]:
+                    cell.font = Font(bold=True, name="Arial", size=10)
+
+        buffer.seek(0)
+        return (
+            buffer.getvalue(),
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # ── Fallback: xlsxwriter engine ──
+    try:
+        import xlsxwriter  # noqa: F401
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Tickets")
+            workbook = writer.book
+            ws = writer.sheets["Tickets"]
+            header_fmt = workbook.add_format({
+                "bold": True, "font_color": "white", "bg_color": "#1E3A5F",
+                "align": "center", "valign": "vcenter",
+            })
+            for col_idx, col_name in enumerate(df.columns):
+                ws.write(0, col_idx, col_name, header_fmt)
+            ws.set_column(0, 0, 12)
+            ws.set_column(1, 1, 48)
+            ws.set_column(2, len(df.columns) - 1, 18)
+            ws.freeze_panes(1, 0)
+
+            if filter_summary:
+                meta_ws = workbook.add_worksheet("Filters Applied")
+                meta_ws.write(0, 0, "Export generated")
+                meta_ws.write(0, 1, datetime.now().strftime("%d %b %Y, %H:%M"))
+                meta_ws.write(1, 0, "Filters applied")
+                meta_ws.write(1, 1, filter_summary)
+                meta_ws.write(2, 0, "Total tickets exported")
+                meta_ws.write(2, 1, len(rows))
+
+        buffer.seek(0)
+        return (
+            buffer.getvalue(),
+            "xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # ── Final fallback: plain CSV (always works, no extra dependency) ──
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    return (csv_buffer.getvalue().encode("utf-8"), "csv", "text/csv")
 
 
 def jira_auth():
@@ -743,20 +796,34 @@ def fetch_prs_for_issues(issue_keys_tuple):
     Fetch PR links for a small tuple of issue keys.
     Returns dict: {issue_key: [{"title":..,"url":..,"state":..}, ...]}
 
-    Strategy:
-    1. Try Jira dev-status API with numeric ID (standard approach)
-    2. Try remoteLinks API — Jira stores linked PRs as remote issue links
-    3. Parse PR URLs from the issue's development panel via renderedFields
+    Hard-capped to stay fast:
+      - Processes at most MAX_TICKETS tickets (skips the rest silently)
+      - Short timeouts (5s) on every call
+      - Stops entirely if a global time budget is exceeded
+      - Tries dev-status once per ticket (single working endpoint, found via
+        one test call), then remoteLinks as fallback — never both per ticket
+        unless the first genuinely returns nothing.
     """
+    import time as _time
+
     if not issue_keys_tuple:
         return {}
 
-    pr_map = {}
-    keys_list = list(issue_keys_tuple)
+    MAX_TICKETS = 60          # hard cap — never process more than this many
+    TIME_BUDGET = 25.0        # seconds — abort remaining work past this point
+    start_time = _time.time()
 
-    # ── Step 1: resolve keys → numeric IDs ──
+    def _time_left():
+        return (_time.time() - start_time) < TIME_BUDGET
+
+    pr_map = {}
+    keys_list = list(issue_keys_tuple)[:MAX_TICKETS]
+
+    # ── Step 1: resolve keys → numeric IDs (one or two batched calls) ──
     key_to_id = {}
     for batch_start in range(0, len(keys_list), 50):
+        if not _time_left():
+            break
         batch = keys_list[batch_start: batch_start + 50]
         try:
             r = requests.get(
@@ -764,7 +831,7 @@ def fetch_prs_for_issues(issue_keys_tuple):
                 auth=jira_auth(), headers=jira_headers(),
                 params={"jql": "issueKey in (" + ",".join(batch) + ")",
                         "maxResults": 50, "fields": "id"},
-                timeout=20,
+                timeout=10,
             )
             if r.status_code == 200:
                 for iss in r.json().get("issues", []):
@@ -772,35 +839,39 @@ def fetch_prs_for_issues(issue_keys_tuple):
         except Exception:
             pass
 
-    # ── Strategy A: dev-status API (all known endpoint variants) ──
+    if not key_to_id or not _time_left():
+        return pr_map
+
+    # ── Step 2: find ONE working dev-status endpoint with a single test call ──
     dev_endpoints = [
         f"{JIRA_BASE}/rest/dev-status/latest/issue/detail",
-        f"{JIRA_BASE}/rest/dev-status/1.0/issue/detail",
         f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/latest/issue/detail",
-        f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/dev-status/1.0/issue/detail",
     ]
-    # Find working endpoint with a single test call on first key
     working_dev_endpoint = None
-    test_id = next(iter(key_to_id.values()), None) if key_to_id else None
-    if test_id:
-        for ep in dev_endpoints:
-            try:
-                tr = requests.get(ep, auth=jira_auth(), headers=jira_headers(),
-                                  params={"issueId": test_id, "dataType": "pullrequest"},
-                                  timeout=8)
-                if tr.status_code == 200:
-                    working_dev_endpoint = ep
-                    break
-            except Exception:
-                pass
+    test_id = next(iter(key_to_id.values()))
+    for ep in dev_endpoints:
+        if not _time_left():
+            break
+        try:
+            tr = requests.get(ep, auth=jira_auth(), headers=jira_headers(),
+                              params={"issueId": test_id, "dataType": "pullrequest"},
+                              timeout=5)
+            if tr.status_code == 200:
+                working_dev_endpoint = ep
+                break
+        except Exception:
+            pass
 
+    # ── Step 3: one call per ticket using the confirmed-working endpoint ──
     if working_dev_endpoint:
         for key, issue_id in key_to_id.items():
+            if not _time_left():
+                break
             try:
                 dr = requests.get(
                     working_dev_endpoint, auth=jira_auth(), headers=jira_headers(),
                     params={"issueId": issue_id, "dataType": "pullrequest"},
-                    timeout=8,
+                    timeout=5,
                 )
                 if dr.status_code == 200:
                     prs = []
@@ -818,58 +889,31 @@ def fetch_prs_for_issues(issue_keys_tuple):
             except Exception:
                 pass
 
-    # ── Strategy B: remoteLinks API ──
-    # Jira stores GitHub/GitLab PR links as "remote issue links" with a globalId
-    # containing the PR URL. This works even when dev-status is inaccessible.
-    keys_needing_prs = [k for k in keys_list if k not in pr_map]
-    for key in keys_needing_prs:
-        try:
-            rl = requests.get(
-                f"{JIRA_BASE}/rest/api/3/issue/{key}/remotelink",
-                auth=jira_auth(), headers=jira_headers(),
-                timeout=8,
-            )
-            if rl.status_code == 200:
-                prs = []
-                for link in rl.json():
-                    obj = link.get("object", {})
-                    url = obj.get("url", "")
-                    title = obj.get("title", "")
-                    # GitHub/GitLab PR URLs contain /pull/ or /merge_requests/
-                    if url and ("/pull/" in url or "/merge_requests/" in url):
-                        # Infer state from title or relationship
-                        state = "MERGED" if "merged" in title.lower() else \
-                                "OPEN" if "open" in title.lower() else "UNKNOWN"
-                        if not any(p["url"] == url for p in prs):
-                            prs.append({"title": title or "PR", "url": url, "state": state})
-                if prs:
-                    pr_map[key] = prs
-        except Exception:
-            pass
-
-    # ── Strategy C: issue renderedFields — extracts PR links from HTML ──
-    # Jira's renderedFields sometimes embeds PR data in the development panel.
-    keys_needing_prs = [k for k in keys_list if k not in pr_map]
-    if keys_needing_prs:
-        import re as _re
-        for key in keys_needing_prs[:20]:  # cap at 20 to stay fast
+    # ── Step 4: remoteLinks fallback — only for tickets dev-status missed ──
+    # Skipped entirely if we're out of time budget.
+    if _time_left():
+        keys_needing_prs = [k for k in key_to_id if k not in pr_map]
+        for key in keys_needing_prs:
+            if not _time_left():
+                break
             try:
-                ir = requests.get(
-                    f"{JIRA_BASE}/rest/api/3/issue/{key}",
+                rl = requests.get(
+                    f"{JIRA_BASE}/rest/api/3/issue/{key}/remotelink",
                     auth=jira_auth(), headers=jira_headers(),
-                    params={"expand": "renderedFields", "fields": "renderedFields"},
-                    timeout=8,
+                    timeout=5,
                 )
-                if ir.status_code == 200:
-                    rendered = str(ir.json().get("renderedFields", {}))
-                    # Extract GitHub/GitLab PR URLs
-                    urls = _re.findall(
-                        r'https://(?:github\.com|gitlab\.com)/[^\s\'"<>]+/(?:pull|merge_requests)/\d+',
-                        rendered
-                    )
-                    if urls:
-                        prs = [{"title": u.split("/")[-1] and f"PR #{u.split('/')[-1]}" or "PR",
-                                "url": u, "state": "UNKNOWN"} for u in set(urls)]
+                if rl.status_code == 200:
+                    prs = []
+                    for link in rl.json():
+                        obj = link.get("object", {})
+                        url = obj.get("url", "")
+                        title = obj.get("title", "")
+                        if url and ("/pull/" in url or "/merge_requests/" in url):
+                            state = "MERGED" if "merged" in title.lower() else \
+                                    "OPEN" if "open" in title.lower() else "UNKNOWN"
+                            if not any(p["url"] == url for p in prs):
+                                prs.append({"title": title or "PR", "url": url, "state": state})
+                    if prs:
                         pr_map[key] = prs
             except Exception:
                 pass
@@ -2010,10 +2054,11 @@ def render_all_history():
             if q in t["key"].lower() or q in t["summary"].lower()
         ]
 
-    # ── Fetch PRs — only for the filtered/visible set ──────────────────────────
-    # Filtered set is typically <100 tickets, making this fast (not 500+ calls).
-    # Cached by key-tuple so changing filters reuses previously fetched results.
-    filtered_keys_tuple = tuple(t["key"] for t in filtered)
+    # ── Fetch PRs — only for the filtered/visible set, capped for speed ────────
+    # Beyond 60 tickets we skip PR lookup entirely (would be too slow) and tell
+    # the person to narrow filters further if they need PR links for that view.
+    PR_FETCH_CAP = 60
+    filtered_keys_tuple = tuple(t["key"] for t in filtered[:PR_FETCH_CAP])
     if filtered_keys_tuple:
         with st.spinner("Loading pull request data…"):
             try:
@@ -2022,6 +2067,12 @@ def render_all_history():
                 pr_map = {}
         for t in filtered:
             t["pull_requests"] = pr_map.get(t["key"], [])
+    if len(filtered) > PR_FETCH_CAP:
+        st.caption(
+            f"ℹ️ Pull request links are only loaded for the first {PR_FETCH_CAP} tickets "
+            f"in the current view (showing {len(filtered)} total). Narrow filters further "
+            f"to see PR links for a specific subset."
+        )
 
     # ── Summary KPIs ──
     total_h = len(filtered)
@@ -2064,15 +2115,18 @@ def render_all_history():
             unsafe_allow_html=True,
         )
     with exp_col2:
-        excel_bytes = build_tickets_excel(filtered, filter_summary)
-        st.download_button(
-            label="📥 Extract to Excel",
-            data=excel_bytes,
-            file_name=f"jules_tickets_export_{date.today().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="export_excel_btn",
-            use_container_width=True,
-        )
+        try:
+            file_bytes, file_ext, mime_type = build_tickets_excel(filtered, filter_summary)
+            st.download_button(
+                label=f"📥 Extract ({file_ext.upper()})",
+                data=file_bytes,
+                file_name=f"jules_tickets_export_{date.today().isoformat()}.{file_ext}",
+                mime=mime_type,
+                key="export_excel_btn",
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.error(f"Export failed: {exc}")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
