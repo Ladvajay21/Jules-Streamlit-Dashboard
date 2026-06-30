@@ -5,6 +5,7 @@ import pandas as pd
 import re
 import os
 import json
+import io
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 
@@ -232,6 +233,86 @@ def check_pin():
 def clean_title(s):
     s = re.sub(r'^(AAWU,?\s*|AAD,?\s*)', '', s, flags=re.IGNORECASE)
     return s.lstrip(',').strip()
+
+
+def build_tickets_excel(tickets, filter_summary=""):
+    """
+    Build an in-memory .xlsx file from a list of ticket dicts.
+    Returns bytes ready for st.download_button.
+    """
+    rows = []
+    for t in tickets:
+        prs = t.get("pull_requests", [])
+        pr_str = "; ".join(pr["url"] for pr in prs) if prs else ""
+        rows.append({
+            "Key": t["key"],
+            "Summary": t["summary"],
+            "Status": t["status"],
+            "Assignee": t["assignee"],
+            "Reporter": t.get("reporter", ""),
+            "Type": t.get("type", ""),
+            "Story Points": t["sp"] if t["sp"] is not None else "",
+            "Sprints": ", ".join(t.get("sprints", [])),
+            "Fix Versions": ", ".join(t.get("fix_versions", [])),
+            "Priority": t.get("priority", ""),
+            "Labels": ", ".join(t.get("labels", [])),
+            "Carried Over": "Yes" if t.get("carried_over") else "No",
+            "Created Date": t.get("created_date", ""),
+            "Resolution Date": t.get("resolution_date", ""),
+            "Pull Requests": pr_str,
+            "Jira Link": f"{JIRA_BASE}/browse/{t['key']}",
+        })
+
+    df = pd.DataFrame(rows)
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Tickets")
+        ws = writer.sheets["Tickets"]
+
+        # Header styling
+        from openpyxl.styles import Font, PatternFill, Alignment
+        header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Column widths
+        widths = {
+            "A": 12, "B": 48, "C": 16, "D": 16, "E": 16, "F": 12,
+            "G": 12, "H": 22, "I": 18, "J": 12, "K": 20, "L": 12,
+            "M": 14, "N": 14, "O": 40, "P": 32,
+        }
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+
+        # Freeze header row
+        ws.freeze_panes = "A2"
+
+        # Body font
+        body_font = Font(name="Arial", size=10)
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.font = body_font
+
+        # Add a small metadata sheet with the applied filters
+        if filter_summary:
+            meta_ws = writer.book.create_sheet("Filters Applied")
+            meta_ws["A1"] = "Export generated"
+            meta_ws["B1"] = datetime.now().strftime("%d %b %Y, %H:%M")
+            meta_ws["A2"] = "Filters applied"
+            meta_ws["B2"] = filter_summary
+            meta_ws["A3"] = "Total tickets exported"
+            meta_ws["B3"] = len(rows)
+            meta_ws.column_dimensions["A"].width = 24
+            meta_ws.column_dimensions["B"].width = 60
+            for cell in [meta_ws["A1"], meta_ws["A2"], meta_ws["A3"]]:
+                cell.font = Font(bold=True, name="Arial", size=10)
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def jira_auth():
@@ -1957,6 +2038,41 @@ def render_all_history():
     with k4: kpi_card("💎", "Total SP", total_sp_h, "#fb923c")
     with k5: kpi_card("✨", "Done SP", done_sp_h, "#34d399")
     with k6: kpi_card("↩", "Carried Over", carried_h, "#fbbf24")
+
+    # ── Export to Excel — respects every currently applied filter ──
+    filter_parts = []
+    if sel_sprint != "🏃 All Sprints":
+        filter_parts.append(f"Sprint = {sel_sprint}")
+    if sel_assignee != "👤 All Assignees":
+        filter_parts.append(f"Assignee = {sel_assignee}")
+    if sel_fv != "📦 All Fix Versions":
+        filter_parts.append(f"Fix Version = {sel_fv}")
+    if sel_status != "All Statuses":
+        filter_parts.append(f"Status Group = {sel_status}")
+    if date_from > min_date or date_to < max_date:
+        filter_parts.append(f"Created between {date_from} and {date_to}")
+    if search_text.strip():
+        filter_parts.append(f"Search = '{search_text.strip()}'")
+    filter_summary = "; ".join(filter_parts) if filter_parts else "No filters applied (all tickets)"
+
+    exp_col1, exp_col2 = st.columns([5, 1])
+    with exp_col1:
+        st.markdown(
+            f'<div style="font-size:10px;color:#475569;padding-top:10px;">'
+            f'📋 Export will include <strong style="color:#94a3b8;">{total_h}</strong> ticket(s) '
+            f'matching: <em>{filter_summary}</em></div>',
+            unsafe_allow_html=True,
+        )
+    with exp_col2:
+        excel_bytes = build_tickets_excel(filtered, filter_summary)
+        st.download_button(
+            label="📥 Extract to Excel",
+            data=excel_bytes,
+            file_name=f"jules_tickets_export_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_excel_btn",
+            use_container_width=True,
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
